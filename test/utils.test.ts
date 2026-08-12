@@ -1,11 +1,19 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { mkdtempSync, rmSync, symlinkSync } from "node:fs";
+import {
+  mkdirSync,
+  mkdtempSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import {
   acquireSessionLock,
+  displayText,
   isSubagentRecord,
+  readIndex,
   resolveSubagentCwd,
   sanitizeForkMessages,
   sanitizeTerminalOutput,
@@ -60,6 +68,12 @@ test("handles absent usage fields and strips terminal control sequences", () => 
     },
   );
   assert.equal(sanitizeTerminalOutput("ok\x1b[31m unsafe\x1b[0m"), "ok unsafe");
+  assert.equal(
+    displayText([{ type: "text", text: "machine" }], {
+      displayText: "human",
+    }),
+    "human",
+  );
 });
 
 test("resolveSubagentCwd resolves valid directories and rejects non-existent paths", () => {
@@ -97,6 +111,20 @@ test("resolveSubagentCwd rejects paths outside the parent and escaping symlinks"
   }
 });
 
+test("reads records from the historical pi-bg root", () => {
+  const sessionId = `historic-${Date.now()}`;
+  const dir = mkdtempSync(join(tmpdir(), "pi-subagent-index-"));
+  const file = join(dir, `${sessionId}.json`);
+  const historic = { ...record, sessionId };
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(file, JSON.stringify(historic));
+  try {
+    assert.deepEqual(readIndex([dir])[sessionId], historic);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("acquireSessionLock acquires and cleans up locks", () => {
   const sessionId = `test-lock-${Date.now()}`;
   const lock = acquireSessionLock(sessionId);
@@ -106,6 +134,18 @@ test("acquireSessionLock acquires and cleans up locks", () => {
     /already running in process/,
   );
   rmSync(lock, { recursive: true, force: true });
+});
+
+test("serializeModelJson enforces the final byte cap", async () => {
+  const { MODEL_OUTPUT_MAX_BYTES, serializeModelJson } =
+    await import("../src/utils.js");
+  const serialized = serializeModelJson({
+    v: 1,
+    type: "subagent",
+    output: '"\\'.repeat(MODEL_OUTPUT_MAX_BYTES),
+  });
+  assert.ok(Buffer.byteLength(serialized) <= MODEL_OUTPUT_MAX_BYTES);
+  assert.equal(JSON.parse(serialized).outputTruncated, true);
 });
 
 test("sanitizeForkMessages strips bg/subagent calls and creates un-mutated message copies", () => {
@@ -143,4 +183,80 @@ test("sanitizeForkMessages strips bg/subagent calls and creates un-mutated messa
   );
   assert.equal(toolCalls.length, 1);
   assert.equal(toolCalls[0].name, "read");
+});
+
+test("sanitizeForkMessages enforces an aggregate context budget", () => {
+  const entries: any[] = [];
+  let parentId: string | null = null;
+  for (let i = 0; i < 20; i++) {
+    const id = `user-${i}`;
+    entries.push({
+      type: "message",
+      id,
+      parentId,
+      message: { role: "user", content: "u".repeat(10_000) },
+    });
+    parentId = id;
+    const assistantId = `assistant-${i}`;
+    entries.push({
+      type: "message",
+      id: assistantId,
+      parentId,
+      message: { role: "assistant", content: "a".repeat(10_000) },
+    });
+    parentId = assistantId;
+  }
+  const sanitized = sanitizeForkMessages({
+    sessionManager: { getBranch: () => entries },
+  } as any);
+  assert.ok(Buffer.byteLength(JSON.stringify(sanitized)) <= 64 * 1024);
+  assert.equal(sanitized[0].role, "user");
+});
+
+test("sanitizeForkMessages keeps the newest assistant reply when a unit exceeds the budget", () => {
+  const user = { role: "user", content: "huge request" };
+  const toolCalls = Array.from({ length: 6 }, (_, index) => ({
+    type: "toolCall",
+    id: `call-${index}`,
+    name: "read",
+    args: JSON.stringify({ path: "x".repeat(15_000) }),
+  }));
+  const assistant = {
+    role: "assistant",
+    content: [
+      ...toolCalls,
+      { type: "text", text: "The newest answer is preserved." },
+    ],
+  };
+  const entries = [
+    {
+      type: "message",
+      id: "1",
+      parentId: null,
+      message: user,
+    },
+    {
+      type: "message",
+      id: "2",
+      parentId: "1",
+      message: assistant,
+    },
+    ...toolCalls.map((call, index) => ({
+      type: "message",
+      id: `3-${index}`,
+      parentId: index === 0 ? "2" : `3-${index - 1}`,
+      message: {
+        role: "toolResult",
+        toolCallId: call.id,
+        content: "r".repeat(16_000),
+      },
+    })),
+  ];
+  const sanitized = sanitizeForkMessages({
+    sessionManager: { getBranch: () => entries },
+  } as any);
+  assert.equal(sanitized.at(-1)!.role, "assistant");
+  const text = sanitized.at(-1)!.content;
+  assert.ok(typeof text === "string" && text.includes("newest answer"));
+  assert.ok(Buffer.byteLength(JSON.stringify(sanitized)) <= 64 * 1024);
 });

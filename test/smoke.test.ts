@@ -41,6 +41,8 @@ test("registers the subagent tool and slash command", async () => {
     cwd: process.cwd(),
     hasUI: false,
     isIdle: () => true,
+    scopedModels: [],
+    modelRegistry: { getAvailable: () => [] },
     sessionManager: {
       getSessionId: () => "smoke-session",
       getSessionFile: () => undefined,
@@ -55,7 +57,94 @@ test("registers the subagent tool and slash command", async () => {
     undefined,
     ctx,
   );
-  assert.match(status.content[0].text, /No matching subagent sessions/);
+  assert.deepEqual(JSON.parse(status.content[0].text).sessions, []);
+  assert.equal(status.details.displayText, "No matching subagent sessions.");
+});
+
+test("queries the live session model scope", async () => {
+  const { tools } = setup();
+  const subagent = tools.find((tool) => tool.name === "subagent");
+  const scopedModels: Array<{
+    model: { provider: string; id: string };
+    thinkingLevel?: string;
+  }> = [
+    {
+      model: { provider: "provider", id: "one" },
+      thinkingLevel: "high",
+    },
+  ];
+  const ctx: any = {
+    cwd: process.cwd(),
+    scopedModels,
+    modelRegistry: {
+      getAvailable: () => scopedModels.map((entry) => entry.model),
+    },
+    sessionManager: {
+      getLeafId: () => "leaf-1",
+      getBranch: () => [{ id: "leaf-1" }],
+    },
+  };
+
+  const first = await subagent.execute(
+    "models-1",
+    { action: "models" },
+    undefined,
+    undefined,
+    ctx,
+  );
+  assert.equal(
+    JSON.parse(first.content[0].text).models[0].model,
+    "provider/one",
+  );
+
+  scopedModels.splice(0, 1, {
+    model: { provider: "provider", id: "two" },
+  });
+  const second = await subagent.execute(
+    "models-2",
+    { action: "models" },
+    undefined,
+    undefined,
+    ctx,
+  );
+  assert.equal(
+    JSON.parse(second.content[0].text).models[0].model,
+    "provider/two",
+  );
+});
+
+test("steer preserves completion mode when omitted", async () => {
+  const { tools, manager } = setup();
+  const subagent = tools.find((tool) => tool.name === "subagent");
+  const session = {
+    isStreaming: true,
+    steer: async () => {},
+  };
+  const job: any = {
+    pid: 1,
+    sessionId: "session-steer",
+    session,
+    completion: "continue",
+  };
+  manager.jobs.set(1, job);
+  const ctx: any = {
+    cwd: process.cwd(),
+    scopedModels: [],
+    modelRegistry: { getAvailable: () => [] },
+    sessionManager: {
+      getLeafId: () => "leaf-1",
+      getBranch: () => [{ id: "leaf-1" }],
+    },
+  };
+
+  await subagent.execute(
+    "steer",
+    { action: "steer", sessionId: "session-steer", message: "next" },
+    undefined,
+    undefined,
+    ctx,
+  );
+  assert.equal(job.completion, "continue");
 });
 
 test("validates subagent parameters", async () => {
@@ -65,6 +154,8 @@ test("validates subagent parameters", async () => {
     cwd: process.cwd(),
     hasUI: false,
     isIdle: () => true,
+    scopedModels: [],
+    modelRegistry: { getAvailable: () => [] },
     sessionManager: {
       getSessionId: () => "smoke-session",
       getSessionFile: () => undefined,

@@ -28,12 +28,15 @@ import { Type } from "typebox";
 import type { SubagentManager } from "./manager.js";
 import {
   getLogDir,
+  HISTORIC_SUBAGENT_LOCKS,
+  HISTORIC_SUBAGENT_SESSION_DIR,
   LEGACY_SUBAGENT_LOCKS,
   LEGACY_SUBAGENT_SESSION_DIR,
   SUBAGENT_INDEX,
   SUBAGENT_LOCKS,
   SUBAGENT_SESSION_DIR,
   SUBAGENT_WORKTREES,
+  retainLog,
   type SubagentJob,
   type SubagentRecord,
   type TerminalState,
@@ -44,12 +47,15 @@ import {
   getScopedModels,
   isPathInside,
   isPathInsideAny,
+  MODEL_OUTPUT_MAX_BYTES,
+  MODEL_OUTPUT_MAX_LINES,
   readIndex,
   renderToolResult,
   resolveSubagentCwd,
   sanitizeTerminalOutput,
   sanitizeForkMessages,
   saveRecord,
+  serializeModelJson,
   SUBAGENT_SESSION_ROOTS,
   SUBAGENT_WORKTREE_ROOTS,
 } from "./utils.js";
@@ -61,6 +67,9 @@ import {
 } from "./worktree.js";
 
 const ABORT_GRACE_MS = 5000;
+const MAX_FULL_OUTPUT_BYTES = 10 * 1024 * 1024;
+const MAX_LIST_ITEMS = 20;
+const MAX_STATUS_TEXT = 160;
 
 function awaitWithoutCancelling<T>(
   promise: Promise<T>,
@@ -95,6 +104,7 @@ export function registerSubagentModule(
     } = current;
     return {
       ...details,
+      ...(job?.stopping ? { state: "stopping" as const } : {}),
       ...(job?.activity ? { activity: job.activity } : {}),
       ...(job
         ? { elapsedSec: Math.round((Date.now() - job.startedAt) / 1000) }
@@ -109,7 +119,13 @@ export function registerSubagentModule(
 
     const cards = sessions.map((s) => {
       const icon =
-        s.state === "running" ? "●" : s.state === "finished" ? "✓" : "✖";
+        s.state === "running"
+          ? "●"
+          : s.state === "stopping"
+            ? "◐"
+            : s.state === "finished"
+              ? "✓"
+              : "✖";
       const duration =
         s.elapsedSec !== undefined
           ? `${s.elapsedSec}s`
@@ -193,23 +209,16 @@ export function registerSubagentModule(
     name: "subagent",
     label: "Subagent",
     description:
-      "Delegate exploration or research tasks to a background subagent. Results are capped at 50KB or 2000 lines; truncated output is saved to a private log and the durable child session remains resumable.",
-    promptSnippet:
-      "Delegate exploration or research tasks to a background subagent.",
+      "Run, inspect, steer, or stop durable background Pi sessions. Query models for the live session scope.",
+    promptSnippet: "Delegate durable background work to a subagent.",
     promptGuidelines: [
-      "Use subagent for multi-step sub-tasks, background research, code audits, refactoring, or sub-problems to keep main context uncluttered.",
-      "Choose appropriate models for subagents based on task requirements (e.g. fast/inexpensive models for simple searches or checks, strong reasoning models with thinking for complex refactoring).",
-      "Provide complete and self-contained instructions in prompt; use context:fork only when the child needs the parent's current conversation.",
-      "Reuse sessionId from an earlier subagent result to continue its saved model, thinking level, cwd, and conversation.",
-      "For high-level or non-technical requests ('check performance', 'audit security', 'investigate codebase'), delegate isolated sub-tasks to subagent.",
-      "For independent tasks that don't depend on each other, spawn multiple subagents in one turn; each runs in the background and its result arrives as it finishes.",
-      "For sequential work that builds on prior results, spawn one subagent, then spawn the next with the previous result in its prompt.",
-      "Use worktree:true for concurrent writing subagents; pi-subagents creates but never merges or removes the branch/worktree.",
-      "After starting a subagent, continue work immediately; NEVER execute sleep, loop, or poll commands to wait for completion. Return response to user or perform other tasks. Subagent results will arrive automatically when ready.",
+      "Use subagent for multi-step or isolated work; continue immediately after spawning and never poll.",
+      "Query subagent action:models before choosing an explicit model when the live session scope may have changed.",
+      "Use subagent context:fork only when parent history is needed; narrow tools when practical; use worktree:true for concurrent edits.",
     ],
     parameters: Type.Object({
       action: Type.Optional(
-        StringEnum(["spawn", "status", "steer", "stop"] as const, {
+        StringEnum(["spawn", "models", "status", "steer", "stop"] as const, {
           description: "Action (default: spawn)",
         }),
       ),
@@ -234,13 +243,19 @@ export function registerSubagentModule(
       completion: Type.Optional(
         StringEnum(["queue", "continue"] as const, {
           description:
-            "continue wakes the parent turn automatically when ready (default); queue does not start a new turn while the parent is idle",
+            "queue stores the result without waking an idle parent (default); continue wakes it",
+        }),
+      ),
+      modelOffset: Type.Optional(
+        Type.Number({
+          minimum: 0,
+          description: "Offset for action:models pagination",
         }),
       ),
       model: Type.Optional(
         Type.String({
           description:
-            "Model override from the active scope; without a scope, the parent model is used; omitted on resume to restore the saved model",
+            "Model override from the live scope; without a scope, any available model may be selected; omitted on new sessions inherits the parent and omitted on resume restores the saved model",
         }),
       ),
       thinking: Type.Optional(
@@ -293,6 +308,7 @@ export function registerSubagentModule(
         sessionId,
         message,
         completion,
+        modelOffset = 0,
         model,
         thinking,
         tools,
@@ -307,6 +323,17 @@ export function registerSubagentModule(
     ) {
       manager.currentCtx = ctx;
       const originLeafId = ctx.sessionManager.getLeafId();
+      const configuredScope = [...getScopedModels(ctx)];
+      const availableModels = ctx.modelRegistry.getAvailable();
+      const availableIds = new Set(
+        availableModels.map(
+          (candidate) => `${candidate.provider}/${candidate.id}`,
+        ),
+      );
+      const scopeRestricted = configuredScope.length > 0;
+      const scopedModels = configuredScope.filter((entry) =>
+        availableIds.has(`${entry.model.provider}/${entry.model.id}`),
+      );
       const requestedId = sessionId?.trim();
       const durable = readIndex();
       const findBySessionPrefix = <T extends { sessionId?: string }>(
@@ -349,6 +376,8 @@ export function registerSubagentModule(
         tools?: string;
         sessionManager: SessionManager;
         existing?: boolean; // resume: keep saved model/thinking unless overridden
+        savedModel?: string;
+        savedThinking?: string;
         checkSetup?: () => void; // spawn: guard against parent session end
         setupSignal?: AbortSignal;
         shutdownHandler?: () => void; // caller controller to abort on ctx.shutdown()
@@ -388,14 +417,23 @@ export function registerSubagentModule(
           }
         }
         const modelSpec = opts.model?.trim();
-        let modelRequestWarning: string | undefined;
         let resolvedModel: Model<any> | undefined;
         let resolvedThinking: ThinkingLevel | undefined;
-        const scopedList = getScopedModels(ctx);
+        let modelRequestWarning: string | undefined;
+        const scopedList = scopedModels;
+        const modelCandidates = scopeRestricted
+          ? scopedList
+          : ctx.modelRegistry
+              .getAvailable()
+              .map((model) => ({ model, thinkingLevel: undefined }));
         if (modelSpec) {
-          if (scopedList.length > 0) {
+          if (scopeRestricted && modelCandidates.length === 0)
+            throw new Error(
+              "No models in the live session scope are currently available; adjust /scoped-models or provider authentication",
+            );
+          if (modelCandidates.length > 0) {
             const lowerSpec = modelSpec.toLowerCase();
-            const exactMatches = scopedList.filter(
+            const exactMatches = modelCandidates.filter(
               (s) =>
                 `${s.model.provider}/${s.model.id}`.toLowerCase() ===
                   lowerSpec ||
@@ -404,10 +442,10 @@ export function registerSubagentModule(
             );
             if (exactMatches.length > 1) {
               throw new Error(
-                `Ambiguous model specifier '${modelSpec}' matched multiple scoped models: ${exactMatches.map((s) => `${s.model.provider}/${s.model.id}`).join(", ")}`,
+                `Ambiguous model '${modelSpec}'. Matches: ${exactMatches.map((s) => `${s.model.provider}/${s.model.id}`).join(", ")}`,
               );
             }
-            const matches = scopedList.filter(
+            const matches = modelCandidates.filter(
               (s) =>
                 s.model.id.toLowerCase().includes(lowerSpec) ||
                 (s.model.name &&
@@ -419,7 +457,7 @@ export function registerSubagentModule(
               matched = matches[0];
             } else if (!matched && matches.length > 1) {
               throw new Error(
-                `Ambiguous model specifier '${modelSpec}' matched multiple scoped models: ${matches.map((s) => `${s.model.provider}/${s.model.id}`).join(", ")}`,
+                `Ambiguous model '${modelSpec}'. Matches: ${matches.map((s) => `${s.model.provider}/${s.model.id}`).join(", ")}`,
               );
             }
             if (matched) {
@@ -429,16 +467,41 @@ export function registerSubagentModule(
               resolvedThinking = matched.thinkingLevel as
                 ThinkingLevel | undefined;
             } else {
-              const availableNames = scopedList
+              const availableNames = modelCandidates
                 .map((s) => `${s.model.provider}/${s.model.id}`)
                 .join(", ");
               throw new Error(
-                `Requested model '${modelSpec}' is not in the active model scope. Available scoped models: ${availableNames}`,
+                scopeRestricted
+                  ? `Model '${modelSpec}' is outside the live session scope. Query subagent action:models and retry. Scope: ${availableNames}`
+                  : `Model '${modelSpec}' is unavailable. Query subagent action:models or omit model to inherit the parent`,
               );
             }
           } else {
-            modelRequestWarning = `Requested model '${modelSpec}' was ignored because no active model scope exists; using the parent model`;
-            console.warn(modelRequestWarning);
+            throw new Error(
+              `Model '${modelSpec}' is unavailable; omit model to inherit the parent`,
+            );
+          }
+        }
+        if (!modelSpec && existing && scopeRestricted) {
+          if (!scopedList.length)
+            throw new Error(
+              "No models in the live session scope are currently available; adjust /scoped-models or provider authentication",
+            );
+          const savedInScope = scopedList.find(
+            (entry) =>
+              `${entry.model.provider}/${entry.model.id}` === opts.savedModel,
+          );
+          if (!savedInScope) {
+            const fallback =
+              scopedList.find(
+                (entry) =>
+                  entry.model.provider === ctx.model?.provider &&
+                  entry.model.id === ctx.model?.id,
+              ) ?? scopedList[0];
+            resolvedModel = fallback.model;
+            resolvedThinking = fallback.thinkingLevel as
+              ThinkingLevel | undefined;
+            modelRequestWarning = `Saved model ${opts.savedModel ?? "unknown"} left the live scope; resumed with ${fallback.model.provider}/${fallback.model.id}`;
           }
         }
         const parentTools = pi.getActiveTools();
@@ -476,14 +539,53 @@ export function registerSubagentModule(
                   s.model.provider === ctx.model?.provider,
               ) ?? scopedList?.[0])
             : undefined;
+        const savedEntry =
+          existing && !resolvedModel && opts.savedModel
+            ? modelCandidates.find(
+                (entry) =>
+                  `${entry.model.provider}/${entry.model.id}` ===
+                  opts.savedModel,
+              )
+            : undefined;
         const selectedModel =
           resolvedModel ??
-          (!existing ? (scopedEntry?.model ?? ctx.model) : undefined);
+          (!existing ? (scopedEntry?.model ?? ctx.model) : savedEntry?.model);
         const effectiveThinking =
           requestedThinking ??
           (!existing
             ? (scopedEntry?.thinkingLevel ?? ctx.thinkingLevel)
             : undefined);
+        if (selectedModel) {
+          const parentAuth =
+            await ctx.modelRegistry.getApiKeyAndHeaders(selectedModel);
+          checkSetup?.();
+          if (parentAuth.ok && parentAuth.apiKey) {
+            await runtime.setRuntimeApiKey(
+              selectedModel.provider,
+              parentAuth.apiKey,
+              {
+                signal: opts.setupSignal,
+                ...(parentAuth.env ? { env: parentAuth.env } : {}),
+              },
+            );
+            checkSetup?.();
+          }
+          const childAvailable = await runtime.getAvailable(
+            selectedModel.provider,
+            { signal: opts.setupSignal },
+          );
+          checkSetup?.();
+          if (
+            !childAvailable.some(
+              (candidate) =>
+                candidate.provider === selectedModel.provider &&
+                candidate.id === selectedModel.id,
+            )
+          )
+            throw new Error(
+              `Model ${selectedModel.provider}/${selectedModel.id} is not available to the child runtime`,
+            );
+        }
         checkSetup?.();
         const trusted = ctx.isProjectTrusted();
         const settingsManager = SettingsManager.create(opts.cwd, undefined, {
@@ -551,6 +653,13 @@ export function registerSubagentModule(
           throw error;
         }
         const session = created.session;
+        const initializedModel = session.model;
+        if (!initializedModel) {
+          try {
+            await session.dispose();
+          } catch {}
+          throw new Error("Subagent session did not initialize a model");
+        }
         let disposed = false;
         let forceDisposed = false;
         const forceDispose = () => {
@@ -599,6 +708,34 @@ export function registerSubagentModule(
           });
         try {
           checkSetup?.();
+          if (existing && resolvedModel) {
+            opts.sessionManager.appendModelChange(
+              initializedModel.provider,
+              initializedModel.id,
+            );
+          }
+          if (
+            existing &&
+            (opts.thinking !== undefined || resolvedThinking !== undefined) &&
+            session.thinkingLevel !== opts.savedThinking
+          ) {
+            opts.sessionManager.appendThinkingLevelChange(
+              session.thinkingLevel,
+            );
+          }
+          if (
+            existing &&
+            scopeRestricted &&
+            !scopedModels.some(
+              (entry) =>
+                entry.model.provider === initializedModel.provider &&
+                entry.model.id === initializedModel.id,
+            )
+          ) {
+            throw new Error(
+              `Saved subagent model ${initializedModel.provider}/${initializedModel.id} is not in the active model scope`,
+            );
+          }
           await session.bindExtensions({
             mode: "print",
             abortHandler: () => void session.abort(),
@@ -623,10 +760,6 @@ export function registerSubagentModule(
           throw error;
         } finally {
           opts.setupSignal?.removeEventListener("abort", abortSetup);
-        }
-        if (!session.model) {
-          await dispose();
-          throw new Error("Subagent session did not initialize a model");
         }
         let actualTools = session.getActiveToolNames();
         let toolInheritanceWarning: string | undefined;
@@ -656,8 +789,8 @@ export function registerSubagentModule(
           const unavailableTools = parentTools.filter(
             (name) => !actualTools.includes(name),
           );
-          const inheritedTools = parentTools.filter((name) =>
-            actualTools.includes(name),
+          const inheritedTools = parentTools.filter(
+            (name) => name !== "subagent" && actualTools.includes(name),
           );
           session.setActiveToolsByName(inheritedTools);
           actualTools = session.getActiveToolNames();
@@ -680,6 +813,56 @@ export function registerSubagentModule(
         };
       };
 
+      if (action === "models") {
+        const unrestricted = !scopeRestricted;
+        const allModels = (
+          unrestricted
+            ? availableModels.map((model) => ({ model }))
+            : scopedModels
+        ).map((entry) => ({
+          model: `${entry.model.provider}/${entry.model.id}`,
+          ...("thinkingLevel" in entry && entry.thinkingLevel
+            ? { thinking: entry.thinkingLevel as ThinkingLevel }
+            : {}),
+        }));
+        const models = allModels.slice(
+          modelOffset,
+          modelOffset + MAX_LIST_ITEMS,
+        );
+        const nextOffset =
+          modelOffset + models.length < allModels.length
+            ? modelOffset + models.length
+            : undefined;
+        const display = `${unrestricted ? "Available subagent models (scope unrestricted)" : "Available scoped subagent models"}:\n${models
+          .map(
+            (entry) =>
+              `- ${entry.model}${entry.thinking ? `:${entry.thinking}` : ""}`,
+          )
+          .join("\n")}`;
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: JSON.stringify({
+                v: 1,
+                type: "subagent",
+                action: "models",
+                scope: unrestricted ? "unrestricted" : "restricted",
+                models,
+                ...(nextOffset !== undefined ? { nextOffset } : {}),
+                total: allModels.length,
+              }),
+            },
+          ],
+          details: {
+            models,
+            unrestricted,
+            nextOffset,
+            total: allModels.length,
+            displayText: display,
+          },
+        };
+      }
       if (action === "status") {
         const active = new Map(
           Array.from(manager.jobs.values()).map((job) => [job.sessionId, job]),
@@ -694,7 +877,10 @@ export function registerSubagentModule(
               ? [durableRecord]
               : []
           : [
-              ...Array.from(active.values(), (job) => job.record!),
+              ...Array.from(active.values(), (job) => job.record!).slice(
+                0,
+                MAX_LIST_ITEMS,
+              ),
               ...Object.values(durable)
                 .filter((record) => !active.has(record.sessionId))
                 .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))
@@ -704,12 +890,39 @@ export function registerSubagentModule(
           statusDetails(record, active.get(record.sessionId)),
         );
         const text = formatSubagentStatusTable(sessions);
-        const nudge = active.size
-          ? "\n\nSubagent results are delivered automatically when ready; check status once for a single diagnostic, not in a polling loop."
-          : "";
+        const compactSessions = sessions.map((session) => ({
+          sessionId: session.sessionId,
+          state: session.state,
+          label: session.label.slice(0, MAX_STATUS_TEXT),
+          model: session.model.slice(0, MAX_STATUS_TEXT),
+          ...(session.thinking ? { thinking: session.thinking } : {}),
+          ...(session.elapsedSec !== undefined
+            ? { elapsedSec: session.elapsedSec }
+            : {}),
+          ...(session.durationSec !== undefined
+            ? { durationSec: session.durationSec }
+            : {}),
+          ...(session.activity
+            ? { activity: session.activity.slice(0, MAX_STATUS_TEXT) }
+            : {}),
+          turns: session.turns,
+          toolCount: session.toolCount,
+          toolFailures: session.toolFailures,
+          ...(session.usage.cost ? { cost: session.usage.cost } : {}),
+        }));
         return {
-          content: [{ type: "text" as const, text: text + nudge }],
-          details: { sessions },
+          content: [
+            {
+              type: "text" as const,
+              text: JSON.stringify({
+                v: 1,
+                type: "subagent",
+                action: "status",
+                sessions: compactSessions,
+              }),
+            },
+          ],
+          details: { sessions, displayText: text },
         };
       }
       if (action === "stop") {
@@ -723,16 +936,30 @@ export function registerSubagentModule(
           content: [
             {
               type: "text" as const,
-              text: `Stopped subagent ${matching.sessionId}`,
+              text: JSON.stringify({
+                v: 1,
+                type: "subagent",
+                action: "stop",
+                sessionId: matching.sessionId,
+                state: "stopping",
+              }),
             },
           ],
-          details: { sessionId: matching.sessionId },
+          details: {
+            sessionId: matching.sessionId,
+            state: "stopping",
+            displayText: `Stopping subagent ${matching.sessionId}`,
+          },
         };
       }
       if (action === "steer") {
         if (!matching?.session)
           throw new Error(
             `Running subagent not found: ${requestedId || "missing sessionId"}`,
+          );
+        if (matching.handedOff)
+          throw new Error(
+            `Subagent ${matching.sessionId} is finishing after a session reload; steer it after its result arrives`,
           );
         if (!message?.trim()) throw new Error("message is required for steer");
         // session.steer() only queues while the agent is streaming; reject
@@ -753,13 +980,24 @@ export function registerSubagentModule(
           content: [
             {
               type: "text" as const,
-              text: `Queued steering for subagent ${matching.sessionId} after its current turn`,
+              text: JSON.stringify({
+                v: 1,
+                type: "subagent",
+                action: "steer",
+                sessionId: matching.sessionId,
+                queued: true,
+              }),
             },
           ],
-          details: { sessionId: matching.sessionId, queued: true },
+          details: {
+            sessionId: matching.sessionId,
+            queued: true,
+            displayText: `Queued steering for subagent ${matching.sessionId}`,
+          },
         };
       }
       if (!prompt?.trim()) throw new Error("prompt is required for spawn");
+      completion ??= "queue";
       const expectedGeneration = manager.generation;
       manager.guard(expectedGeneration);
       const setupController = new AbortController();
@@ -949,17 +1187,35 @@ export function registerSubagentModule(
         };
         try {
           if (existing) {
-            const lockDir =
-              validatedSessionFile &&
-              isPathInside(LEGACY_SUBAGENT_SESSION_DIR, validatedSessionFile)
-                ? LEGACY_SUBAGENT_LOCKS
-                : SUBAGENT_LOCKS;
+            const lockDir = validatedSessionFile
+              ? isPathInside(
+                  HISTORIC_SUBAGENT_SESSION_DIR,
+                  validatedSessionFile,
+                )
+                ? HISTORIC_SUBAGENT_LOCKS
+                : isPathInside(
+                      LEGACY_SUBAGENT_SESSION_DIR,
+                      validatedSessionFile,
+                    )
+                  ? LEGACY_SUBAGENT_LOCKS
+                  : SUBAGENT_LOCKS
+              : SUBAGENT_LOCKS;
             sessionLock = acquireSessionLock(existing.sessionId, lockDir);
           }
           sessionManager = existing
             ? SessionManager.open(
                 validatedSessionFile ?? existing.sessionFile,
-                SUBAGENT_SESSION_DIR,
+                isPathInside(
+                  HISTORIC_SUBAGENT_SESSION_DIR,
+                  validatedSessionFile ?? "",
+                )
+                  ? HISTORIC_SUBAGENT_SESSION_DIR
+                  : isPathInside(
+                        LEGACY_SUBAGENT_SESSION_DIR,
+                        validatedSessionFile ?? "",
+                      )
+                    ? LEGACY_SUBAGENT_SESSION_DIR
+                    : SUBAGENT_SESSION_DIR,
                 childCwd,
               )
             : SessionManager.create(
@@ -986,6 +1242,9 @@ export function registerSubagentModule(
         }
         let prepared: Awaited<ReturnType<typeof setupChildSession>> | undefined;
         try {
+          const savedContext = existing
+            ? sessionManager.buildSessionContext()
+            : undefined;
           prepared = await setupChildSession({
             cwd: childCwd,
             model,
@@ -993,6 +1252,10 @@ export function registerSubagentModule(
             tools,
             sessionManager,
             existing: Boolean(existing),
+            savedModel: savedContext?.model
+              ? `${savedContext.model.provider}/${savedContext.model.modelId}`
+              : existing?.model,
+            savedThinking: savedContext?.thinkingLevel,
             checkSetup,
             setupSignal,
             shutdownHandler: () => controller.abort(),
@@ -1060,6 +1323,7 @@ export function registerSubagentModule(
       }
 
       const pid = manager.nextVirtualPid++;
+      const completionId = randomUUID();
       let timedOut = false;
       let cancelled = false;
       let lastAssistantMessage: AssistantMessage | undefined;
@@ -1125,6 +1389,7 @@ export function registerSubagentModule(
           startedAt: Date.now(),
           sessionId: session.sessionId,
           controller,
+          completionId,
           forceCleanup: forceCleanupChild,
           session,
           activity: "starting",
@@ -1132,6 +1397,10 @@ export function registerSubagentModule(
           baseline: session.getSessionStats(),
           record,
           toolFailures: 0,
+          originLeafId,
+          expectedGeneration,
+          originSessionFile: ctx.sessionManager.getSessionFile() ?? "",
+          originSessionId: ctx.sessionManager.getSessionId(),
         };
         manager.jobs.set(pid, job);
         saveRecord(record);
@@ -1268,17 +1537,35 @@ export function registerSubagentModule(
                 : "finished";
           let reason = thrown ?? assistant?.errorMessage;
           const rawText = extractTextContent(assistant?.content).trim();
-          const truncated = truncateTail(rawText);
+          const truncated = truncateTail(rawText, {
+            maxBytes: MODEL_OUTPUT_MAX_BYTES,
+            maxLines: MODEL_OUTPUT_MAX_LINES,
+          });
           let truncationNote = "";
+          let retainedLogFile: string | undefined;
           if (truncated.truncated) {
-            const logFile = join(getLogDir(), `${randomUUID()}.log`);
             try {
-              writeFileSync(logFile, rawText, { mode: 0o600 });
-              truncationNote = `\n\nResult truncated; full output: ${logFile}`;
+              const bytes = Buffer.from(rawText);
+              const retained = bytes.subarray(0, MAX_FULL_OUTPUT_BYTES);
+              // Retained logs are durable (survive process exit and updates).
+              retainedLogFile = retainLog(retained);
+              if (!retainedLogFile) {
+                const logDir = getLogDir();
+                if (logDir) {
+                  const logFile = join(logDir, `${randomUUID()}.log`);
+                  writeFileSync(logFile, retained, { mode: 0o600 });
+                  retainedLogFile = logFile;
+                }
+              }
+              truncationNote = retainedLogFile
+                ? bytes.length > retained.length
+                  ? `\n\nResult truncated; retained output log (capped at ${MAX_FULL_OUTPUT_BYTES} bytes): ${retainedLogFile}`
+                  : `\n\nResult truncated; full output: ${retainedLogFile}`
+                : "";
             } catch (logError) {
               console.warn(`Could not save full subagent output:`, logError);
               truncationNote =
-                "\n\nResult truncated; full output remains in the durable session file.";
+                "\n\nResult truncated; full output remains in the durable session file; a temporary log could not be retained.";
             }
           }
           const terminalFields = {
@@ -1286,6 +1573,7 @@ export function registerSubagentModule(
             durationSec: Math.round((Date.now() - job.startedAt) / 1000),
             updatedAt: new Date().toISOString(),
           } as const;
+          const handoffPath = manager.handoffPathFor(completionId);
           if (
             !manager.shuttingDown &&
             manager.generation === expectedGeneration
@@ -1307,6 +1595,18 @@ export function registerSubagentModule(
             }
           } else {
             job.record = { ...job.record!, ...terminalFields };
+            if (handoffPath) {
+              // Session replaced: persist the terminal record so the next
+              // runtime sees a finished child instead of a stale "running".
+              try {
+                saveRecord(job.record);
+              } catch (recordError) {
+                console.warn(
+                  `Could not save final subagent state:`,
+                  recordError,
+                );
+              }
+            }
           }
           const completedRecord = job.record!;
           const usage = completedRecord.usage;
@@ -1328,13 +1628,53 @@ export function registerSubagentModule(
             ? `\n\n${truncated.content}`
             : "";
           const reasonText = reason ? `\n\nReason: ${reason}` : "";
-          manager.deliverCompletion(
-            `${header}${mainContent}${truncationNote}${reasonText}${recovery}${fallback}${badge}`,
-            job.stoppedManually ? "queue" : (job.completion ?? "continue"),
-            expectedGeneration,
-            originLeafId,
-            !job.stoppedManually,
-          );
+          const compact = serializeModelJson({
+            v: 1,
+            type: "subagent",
+            event: "complete",
+            sessionId: session.sessionId,
+            state,
+            ...(truncated.content ? { output: truncated.content } : {}),
+            ...(reason ? { reason: sanitizeTerminalOutput(reason) } : {}),
+            ...(truncated.truncated ? { outputTruncated: true } : {}),
+            ...(retainedLogFile ? { logPath: retainedLogFile } : {}),
+            durationSec: completedRecord.durationSec ?? 0,
+            turns: completedRecord.turns,
+            toolCount: completedRecord.toolCount,
+            toolFailures: completedRecord.toolFailures,
+            ...(usage.cost ? { cost: usage.cost } : {}),
+          });
+          const display = `${header}${mainContent}${truncationNote}${reasonText}${recovery}${fallback}${badge}`;
+          const completionDetails = {
+            sessionId: session.sessionId,
+            state,
+            durationSec: completedRecord.durationSec ?? 0,
+            turns: completedRecord.turns,
+            toolCount: completedRecord.toolCount,
+            toolFailures: completedRecord.toolFailures,
+          };
+          if (handoffPath) {
+            // The old runtime cannot deliver through the stale extension
+            // context; persist the result for the origin session's next
+            // runtime.
+            manager.writeHandoffResult(handoffPath, {
+              message: compact,
+              displayMessage: display,
+              details: completionDetails,
+              triggerTurn: !job.stoppedManually,
+            });
+          } else {
+            manager.deliverCompletion(
+              compact,
+              job.stoppedManually ? "queue" : (job.completion ?? "queue"),
+              expectedGeneration,
+              originLeafId,
+              !job.stoppedManually,
+              completionId,
+              display,
+              completionDetails,
+            );
+          }
         } finally {
           clearTimeout(timer);
           if (activityTimer) clearTimeout(activityTimer);
@@ -1355,15 +1695,23 @@ export function registerSubagentModule(
       manager.track(done);
 
       const location = branch ? `\nBranch: ${branch}` : "";
-      const queueMsg =
-        completion === "queue"
-          ? " Output queued without starting a new turn while idle."
-          : " The result will arrive automatically.";
+      const displayText = `${existing ? "Continued" : "Created"} subagent "${label}" [${displayModel}:${session.thinkingLevel}] • Session: ${session.sessionId}.${location}${fallback}`;
       return {
         content: [
           {
             type: "text",
-            text: `${existing ? "Continued" : "Created"} subagent "${label}" [${displayModel}:${session.thinkingLevel}] • Session: ${session.sessionId}.${queueMsg}${location}${fallback}`,
+            text: JSON.stringify({
+              v: 1,
+              type: "subagent",
+              action: existing ? "resume" : "spawn",
+              pid,
+              sessionId: session.sessionId,
+              state: "running",
+              model: displayModel,
+              thinking: session.thinkingLevel,
+              completion,
+              ...(branch ? { branch } : {}),
+            }),
           },
         ],
         details: {
@@ -1375,6 +1723,7 @@ export function registerSubagentModule(
           context: record.context,
           state: record.state,
           continued: Boolean(existing),
+          displayText,
           ...(branch ? { branch } : {}),
           ...(modelFallbackMessage
             ? { modelFallback: modelFallbackMessage }
@@ -1389,6 +1738,12 @@ export function registerSubagentModule(
       const safe = (value: unknown) =>
         sanitizeTerminalOutput(String(value ?? ""));
       const action = args.action ?? "spawn";
+      if (action === "models")
+        return new Text(
+          theme.fg("toolTitle", theme.bold("Query subagent models")),
+          0,
+          0,
+        );
       if (action === "status")
         return new Text(
           theme.fg(
