@@ -12,7 +12,7 @@ import {
 import {
   SUBAGENT_DIR,
   SUBAGENT_SESSION_DIR,
-  type BgJob,
+  type SubagentJob,
   type SubagentRecord,
 } from "./types.js";
 import {
@@ -34,10 +34,6 @@ const WIDGET_REFRESH_MS = 200;
 // sleep, a watch loop, or a loop body/loop construct that sleeps (statement
 // splitting on `;` turns `while true; do sleep 1; done` into `while true`,
 // `do sleep 1`, `done`, which the `do sleep` rule catches).
-// Statement-level matching keeps legitimate commands working (`rg sleep`,
-// `timeout 30 npm test`, `for f in *.js; do cat $f; done`) while catching
-// chains like `git pull && sleep 10` and `n=0; while [ $n -lt 5 ]; do sleep
-// 1; done`.
 const WAITING_STATEMENT_RE = [
   /^sleep\s+\d+(?:\.\d+)?(?:s|m|h)?$/i,
   /^watch\s+/i,
@@ -47,10 +43,8 @@ const WAITING_STATEMENT_RE = [
 ];
 
 /**
- * Blocks bash sleep/polling loops at the tool boundary. `bg` and `subagent`
- * are push-based: results are delivered automatically when ready, so waiting
- * model calls waste turns. Prompt guidelines alone are not enough; some
- * models ignore them and run `sleep 10 && subagent status` loops.
+ * Blocks bash sleep/polling loops at the tool boundary. Subagent results are
+ * delivered automatically, so waiting model calls waste turns.
  */
 export function registerWaitBlocker(pi: ExtensionAPI) {
   pi.on("tool_call", (event) => {
@@ -64,15 +58,15 @@ export function registerWaitBlocker(pi: ExtensionAPI) {
         return {
           block: true,
           reason:
-            "Do not use sleep or polling loops to wait for bg jobs or subagents; results arrive automatically when ready. Continue other work instead.",
+            "Do not use sleep or polling loops to wait for subagents; results arrive automatically when ready. Continue other work instead.",
         };
       }
     }
   });
 }
 
-export class JobManager {
-  public jobs = new Map<number, BgJob>();
+export class SubagentManager {
+  public jobs = new Map<number, SubagentJob>();
   public nextVirtualPid = 1;
   public currentCtx: ExtensionContext | undefined;
   public generation = 0;
@@ -90,8 +84,7 @@ export class JobManager {
   constructor(public pi: ExtensionAPI) {}
 
   public init() {
-    // Ensure storage roots are private before anything writes into them
-    // (SessionManager would otherwise create them with default perms).
+    // Ensure storage roots are private before anything writes into them.
     ensurePrivateDir(SUBAGENT_DIR);
     ensurePrivateDir(SUBAGENT_SESSION_DIR);
 
@@ -110,7 +103,7 @@ export class JobManager {
 
   private registerMessageRenderer() {
     this.pi.registerMessageRenderer(
-      "pi-background-agents-result",
+      "pi-subagent-result",
       (message, options, theme) => {
         const text = sanitizeTerminalOutput(
           extractTextContent(message.content),
@@ -120,10 +113,6 @@ export class JobManager {
         const lines = text.trim().split("\n");
         const firstLine = lines[0] ?? "";
         const isError = [
-          "Background task could not start",
-          "Background task failed",
-          "Background task timed out",
-          "Background task was stopped",
           "Background subagent timed out",
           "Background subagent was stopped",
           "Background subagent failed",
@@ -188,20 +177,15 @@ export class JobManager {
       }
       for (const [pid, job] of this.jobs) {
         try {
-          if (job.record) {
-            job.record = {
-              ...this.currentRecord(job),
-              state: "interrupted",
-              updatedAt: new Date().toISOString(),
-              durationSec: Math.round((Date.now() - job.startedAt) / 1000),
-            };
-            saveRecord(job.record);
-          }
+          job.record = {
+            ...this.currentRecord(job),
+            state: "interrupted",
+            updatedAt: new Date().toISOString(),
+            durationSec: Math.round((Date.now() - job.startedAt) / 1000),
+          };
+          saveRecord(job.record);
         } catch (error) {
-          console.warn(
-            `Could not persist interrupted background job ${pid}:`,
-            error,
-          );
+          console.warn(`Could not persist interrupted subagent ${pid}:`, error);
         } finally {
           this.killJob(pid);
         }
@@ -222,11 +206,9 @@ export class JobManager {
         ]);
         if (shutdownTimedOut) {
           for (const job of this.jobs.values()) {
-            if (job.kind === "subagent") {
-              try {
-                job.forceDispose?.();
-              } catch {}
-            }
+            try {
+              job.forceDispose();
+            } catch {}
           }
         }
       } finally {
@@ -249,7 +231,7 @@ export class JobManager {
 
     const activeJobs = Array.from(this.jobs.values());
     if (activeJobs.length === 0) {
-      active.ui.setWidget("bg-subagents", undefined);
+      active.ui.setWidget("pi-subagents", undefined);
       if (this.widgetTimer) {
         clearInterval(this.widgetTimer);
         this.widgetTimer = undefined;
@@ -258,7 +240,7 @@ export class JobManager {
     }
 
     active.ui.setWidget(
-      "bg-subagents",
+      "pi-subagents",
       (_tui, theme) => {
         const frame =
           BRAILLE[Math.floor(Date.now() / WIDGET_REFRESH_MS) % BRAILLE.length];
@@ -267,21 +249,13 @@ export class JobManager {
           render(width: number) {
             const count = activeJobs.length;
             const innerWidth = Math.max(10, width - 2);
-            const hasBg = activeJobs.some((j) => j.kind === "shell");
-            const hasSub = activeJobs.some((j) => j.kind === "subagent");
-            const kind =
-              hasBg && hasSub ? "bg+sub" : hasSub ? "subagent" : "bg";
-            const title = ` ${kind === "bg" ? "Background Jobs" : kind === "subagent" ? "Subagents" : "Jobs"} (${count}) `;
-            const rightHint = hasBg ? " /bg " : "";
-            const topFillLen = Math.max(
-              0,
-              innerWidth - visibleWidth(title) - visibleWidth(rightHint),
-            );
+            const title = ` Subagents (${count}) `;
+            const topFillLen = Math.max(0, innerWidth - visibleWidth(title));
             const top = truncateToWidth(
               bColor("╭") +
                 theme.fg("accent", theme.bold(title)) +
                 bColor("─".repeat(topFillLen)) +
-                bColor(rightHint + "╮"),
+                bColor("╮"),
               width,
             );
 
@@ -291,27 +265,17 @@ export class JobManager {
 
             const jobLines = visibleJobs.map((job) => {
               const elapsed = Math.round((Date.now() - job.startedAt) / 1000);
-              const icon =
-                job.kind === "shell"
-                  ? theme.fg("accent", "⚡")
-                  : theme.fg("success", "●");
+              const icon = theme.fg("success", "●");
               const progress = job.activity
                 ? `, ${truncateToWidth(sanitizeTerminalOutput(job.activity), 24)}`
                 : "";
-              const badgeText = job.session?.model
+              const badgeText = job.session.model
                 ? sanitizeTerminalOutput(
                     `${job.session.model.id}:${job.session.thinkingLevel}`,
                   )
-                : job.kind === "subagent" && job.record?.model
-                  ? sanitizeTerminalOutput(job.record.model)
-                  : undefined;
-              const kindTag = job.kind === "subagent" ? " [sub]" : "";
+                : sanitizeTerminalOutput(job.record.model);
               const queueTag = job.completion === "queue" ? " Q" : "";
-              const badge = badgeText
-                ? ` [${badgeText}${queueTag}]`
-                : queueTag || kindTag
-                  ? `${kindTag}${queueTag ? " Q" : ""}`
-                  : "";
+              const badge = ` [${badgeText}${queueTag}]`;
               const prefix = ` ${icon} `;
               const meta = `${badge} ${theme.fg("dim", `(running, ${elapsed}s${progress})`)}`;
               const availForCmd = Math.max(
@@ -348,8 +312,6 @@ export class JobManager {
             }
 
             const bottom = bColor("╰" + "─".repeat(innerWidth) + "╯");
-            // TUI requires every line to fit `width` (bottom border is the one
-            // line not built against it; truncate defensively).
             return [top, ...jobLines, bottom].map((line) =>
               truncateToWidth(line, width),
             );
@@ -375,7 +337,7 @@ export class JobManager {
   ) {
     this.pi.sendMessage(
       {
-        customType: "pi-background-agents-result",
+        customType: "pi-subagent-result",
         content: sanitizeTerminalOutput(message),
         display: true,
       },
@@ -393,7 +355,7 @@ export class JobManager {
         try {
           this.sendCompletionMessage(item.message, item.completion, ctx);
         } catch (error) {
-          console.warn("Could not deliver pending bg result:", error);
+          console.warn("Could not deliver pending subagent result:", error);
         }
       }
     }
@@ -405,13 +367,11 @@ export class JobManager {
       this.generation !== expectedGeneration ||
       this.lifecycle.signal.aborted
     )
-      throw new Error("Parent session ended during background setup");
+      throw new Error("Parent session ended during subagent setup");
   }
 
   public track(done: Promise<void>) {
     this.pending.add(done);
-    // Catch on the finally chain so a rejecting job never leaves an
-    // unhandled rejection behind.
     void done.finally(() => this.pending.delete(done)).catch(() => {});
     return done;
   }
@@ -434,7 +394,7 @@ export class JobManager {
     try {
       this.sendCompletionMessage(message, completion, active);
     } catch (error) {
-      console.warn("Could not deliver bg result:", error);
+      console.warn("Could not deliver subagent result:", error);
       this.pendingCompletions.push({
         message,
         completion,
@@ -470,9 +430,7 @@ export class JobManager {
     return stopped;
   }
 
-  public currentRecord(job: BgJob): SubagentRecord {
-    if (!job.session || !job.record || !job.baseline)
-      throw new Error("currentRecord called on an incomplete job");
+  public currentRecord(job: SubagentJob): SubagentRecord {
     const stats = job.session.getSessionStats();
     return {
       ...job.record,
@@ -484,27 +442,27 @@ export class JobManager {
         : {}),
       turns: stats.assistantMessages - job.baseline.assistantMessages,
       toolCount: stats.toolCalls - job.baseline.toolCalls,
-      toolFailures: job.toolFailures ?? 0,
+      toolFailures: job.toolFailures,
       usage: usageSince(stats, job.baseline),
     };
   }
 
   public async manageJobs(ctx: ExtensionContext) {
     if (this.jobs.size === 0)
-      return ctx.ui.notify("No background jobs running", "info");
-    const choice = await ctx.ui.select("Select job to stop:", [
+      return ctx.ui.notify("No subagents running", "info");
+    const choice = await ctx.ui.select("Select subagent to stop:", [
       "Cancel",
       "Stop all",
       ...Array.from(
         this.jobs.values(),
         (job) =>
-          `[${job.pid}] ${job.command}${job.sessionId ? ` [session: ${job.sessionId.slice(0, 8)}]` : ""} (${Math.round((Date.now() - job.startedAt) / 1000)}s)`,
+          `[${job.pid}] ${job.command} [session: ${job.sessionId.slice(0, 8)}] (${Math.round((Date.now() - job.startedAt) / 1000)}s)`,
       ),
     ]);
     if (choice === "Stop all") {
       const stopped = this.killAllJobs();
       ctx.ui.notify(
-        `Stopped ${stopped} background job${stopped === 1 ? "" : "s"}`,
+        `Stopped ${stopped} subagent${stopped === 1 ? "" : "s"}`,
         "info",
       );
       this.syncStatus(ctx);
@@ -512,7 +470,7 @@ export class JobManager {
     }
     const pid = Number(choice?.match(/\[(-?\d+)\]/)?.[1]);
     if (choice !== "Cancel" && Number.isInteger(pid) && this.killJob(pid)) {
-      ctx.ui.notify(`Stopped background job ${pid}`, "info");
+      ctx.ui.notify(`Stopped subagent ${pid}`, "info");
       this.syncStatus(ctx);
     }
   }

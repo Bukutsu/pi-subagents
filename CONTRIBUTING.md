@@ -3,21 +3,17 @@
 ## Setup
 
 ```bash
-git clone https://github.com/Bukutsu/pi-background-agents.git
-cd pi-background-agents
+git clone https://github.com/Bukutsu/pi-subagents.git
+cd pi-subagents
 bun install
 ```
 
-## Type check
+## Verify
 
 ```bash
 bun run check
+bun test
 ```
 
-## Submitting a pull request
-
-1. Fork the repository and create a branch from `master`.
-2. Make your changes and run `bun run check` to verify there are no type errors or formatting issues.
-3. Open a pull request describing what changed and why.
-
-Keep pull requests focused. Smaller PRs are easier to review.
+Keep changes focused on child Pi sessions. Shell process management belongs in
+`pi-bg`.

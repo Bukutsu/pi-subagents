@@ -223,7 +223,7 @@ export function sanitizeForkMessages(ctx: ExtensionContext) {
   for (const message of messages) {
     if (
       message.role === "custom" &&
-      message.customType === "pi-background-agents-result"
+      message.customType === "pi-subagent-result"
     )
       continue;
     if (

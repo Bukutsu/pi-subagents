@@ -110,7 +110,7 @@ export async function createWorktree(
     );
   const root = realpathSync(rootResult.stdout.trim());
   const id = randomUUID().slice(0, 8);
-  const branch = `pi-background-agents/${Date.now()}-${id}`;
+  const branch = `pi-subagents/${Date.now()}-${id}`;
   ensurePrivateDir(SUBAGENT_WORKTREES);
   const path = join(SUBAGENT_WORKTREES, `${basename(root)}-${id}`);
   try {

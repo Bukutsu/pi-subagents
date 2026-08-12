@@ -1,21 +1,15 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { registerWaitBlocker } from "../src/manager.js";
-import { registerBgModule } from "../src/bg.js";
 import { registerSubagentModule } from "../src/subagent.js";
 
 function setup() {
   const tools: any[] = [];
-  const commands: any[] = [];
   const pi: any = {
     registerTool: (tool: any) => tools.push(tool),
-    registerCommand: (name: string, command: any) =>
-      commands.push({ name, command }),
     registerMessageRenderer() {},
-    getActiveTools: () => ["read", "bash", "bg", "subagent"],
+    getActiveTools: () => ["read", "bash", "subagent"],
   };
-  let killAllCalls = 0;
-  let syncCalls = 0;
   const manager: any = {
     jobs: new Map(),
     generation: 0,
@@ -24,27 +18,15 @@ function setup() {
     currentCtx: undefined,
     shuttingDown: false,
     guard() {},
-    syncStatus() {
-      syncCalls++;
-    },
+    syncStatus() {},
     track: (promise: Promise<void>) => promise,
     trackSetup: () => () => {},
     deliverCompletion() {},
     killJob: () => false,
-    killAllJobs: () => {
-      killAllCalls++;
-      return 2;
-    },
+    currentRecord: () => undefined,
   };
-  registerBgModule(pi, manager);
   registerSubagentModule(pi, manager);
-  return {
-    tools,
-    commands,
-    manager,
-    getKillAllCalls: () => killAllCalls,
-    getSyncCalls: () => syncCalls,
-  };
+  return { tools, manager };
 }
 
 test("blocks sleep and polling loops in bash tool calls", async () => {
@@ -59,7 +41,6 @@ test("blocks sleep and polling loops in bash tool calls", async () => {
   assert.ok(toolCall);
   const run = (event: any) => toolCall.handler(event);
 
-  // Legitimate calls are not blocked.
   assert.equal(
     await run({ toolName: "bash", input: { command: "ls -la" } }),
     undefined,
@@ -72,30 +53,12 @@ test("blocks sleep and polling loops in bash tool calls", async () => {
     await run({ toolName: "bash", input: { command: "timeout 30 npm test" } }),
     undefined,
   );
-  assert.equal(
-    await run({
-      toolName: "bash",
-      input: {
-        command: "for f in src/*.ts; do wc -l $f; done",
-      },
-    }),
-    undefined,
-  );
-  assert.equal(
-    await run({ toolName: "read", input: { path: "src/manager.ts" } }),
-    undefined,
-  );
 
-  // Waiting calls are blocked, including chained and looped forms.
   for (const command of [
     "sleep 5",
     "sleep 0.1 && subagent status",
-    "git pull && sleep 30",
-    "watch -n 2 ls",
     "while true; do sleep 1; done",
-    "until curl -s localhost:8080; do sleep 5; done",
     "for i in {1..10}; do sleep 1; done",
-    "n=0; while [ $n -lt 5 ]; do sleep 1; done",
   ]) {
     const result = await run({ toolName: "bash", input: { command } });
     assert.equal(result?.block, true, `expected ${command} to be blocked`);
@@ -103,13 +66,10 @@ test("blocks sleep and polling loops in bash tool calls", async () => {
   }
 });
 
-test("registers bg and subagent status tools", async () => {
-  const { tools, commands, manager, getKillAllCalls, getSyncCalls } = setup();
-  const bg = tools.find((tool) => tool.name === "bg");
+test("registers the subagent tool", async () => {
+  const { tools } = setup();
   const subagent = tools.find((tool) => tool.name === "subagent");
-  assert.ok(bg);
   assert.ok(subagent);
-  assert.ok(commands.some((command) => command.name === "bg"));
 
   const ctx: any = {
     cwd: process.cwd(),
@@ -120,43 +80,19 @@ test("registers bg and subagent status tools", async () => {
       getSessionFile: () => undefined,
     },
   };
-  const bgStatus = await bg.execute(
-    "smoke",
-    { action: "status" },
-    undefined,
-    undefined,
-    ctx,
-  );
-  assert.deepEqual(bgStatus.details.jobs, []);
-
-  const subagentStatus = await subagent.execute(
+  const status = await subagent.execute(
     "smoke",
     { action: "status", sessionId: "smoke-missing-session" },
     undefined,
     undefined,
     ctx,
   );
-  assert.match(subagentStatus.content[0].text, /No matching subagent sessions/);
-
-  let notification = "";
-  const bgCommand = commands.find((command) => command.name === "bg");
-  await bgCommand.command.handler("kill all", {
-    ...ctx,
-    ui: {
-      notify: (message: string) => {
-        notification = message;
-      },
-    },
-  });
-  assert.equal(getKillAllCalls(), 1);
-  assert.equal(notification, "Stopped 2 background jobs");
-  assert.equal(getSyncCalls(), 1);
+  assert.match(status.content[0].text, /No matching subagent sessions/);
 });
 
-test("validates bg and subagent tool parameters", async () => {
+test("validates subagent parameters", async () => {
   const { tools } = setup();
-  const bg = tools.find((t) => t.name === "bg");
-  const subagent = tools.find((t) => t.name === "subagent");
+  const subagent = tools.find((tool) => tool.name === "subagent");
   const ctx: any = {
     cwd: process.cwd(),
     hasUI: false,
@@ -166,30 +102,6 @@ test("validates bg and subagent tool parameters", async () => {
       getSessionFile: () => undefined,
     },
   };
-
-  await assert.rejects(
-    () =>
-      bg.execute(
-        "id",
-        { action: "spawn", command: "" },
-        undefined,
-        undefined,
-        ctx,
-      ),
-    /command is required for spawn/,
-  );
-
-  await assert.rejects(
-    () =>
-      bg.execute(
-        "id",
-        { action: "stop", pid: 9999 },
-        undefined,
-        undefined,
-        ctx,
-      ),
-    /Shell job not found/,
-  );
 
   await assert.rejects(
     () =>

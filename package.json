@@ -1,14 +1,12 @@
 {
-  "name": "pi-background-agents",
+  "name": "pi-subagents",
   "version": "0.4.11",
-  "description": "Background shell jobs and SDK-native subagents for Pi",
+  "description": "SDK-native background subagents for Pi",
   "type": "module",
   "keywords": [
     "pi-package",
     "pi-extension",
-    "background",
     "subagent",
-    "bash-bg",
     "async"
   ],
   "license": "MIT",
@@ -31,11 +29,11 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/Bukutsu/pi-background-agents.git"
+    "url": "git+https://github.com/Bukutsu/pi-subagents.git"
   },
-  "homepage": "https://github.com/Bukutsu/pi-background-agents#readme",
+  "homepage": "https://github.com/Bukutsu/pi-subagents#readme",
   "bugs": {
-    "url": "https://github.com/Bukutsu/pi-background-agents/issues"
+    "url": "https://github.com/Bukutsu/pi-subagents/issues"
   },
   "pi": {
     "extensions": [

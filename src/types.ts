@@ -9,7 +9,7 @@ import { join } from "node:path";
 
 let logDir: string | undefined;
 export const getLogDir = () =>
-  (logDir ??= mkdtempSync(join(tmpdir(), "pi-background-agents-")));
+  (logDir ??= mkdtempSync(join(tmpdir(), "pi-subagents-")));
 
 process.on("exit", () => {
   if (logDir) {
@@ -19,7 +19,7 @@ process.on("exit", () => {
   }
 });
 
-export const SUBAGENT_DIR = join(getAgentDir(), "pi-background-agents");
+export const SUBAGENT_DIR = join(getAgentDir(), "pi-subagents");
 export const SUBAGENT_SESSION_DIR = join(SUBAGENT_DIR, "sessions");
 export const SUBAGENT_INDEX = join(SUBAGENT_DIR, "index");
 export const SUBAGENT_LOCKS = join(SUBAGENT_DIR, "locks");
@@ -49,19 +49,18 @@ export interface SubagentRecord {
   ownerPid?: number;
 }
 
-export interface BgJob {
+export interface SubagentJob {
   pid: number;
   command: string;
   startedAt: number;
-  sessionId?: string;
+  sessionId: string;
   controller: AbortController;
-  forceDispose?: () => void;
-  kind: "shell" | "subagent";
-  session?: AgentSession;
+  forceDispose: () => void;
+  session: AgentSession;
   activity?: string;
-  baseline?: SessionStats;
-  record?: SubagentRecord;
-  toolFailures?: number;
+  baseline: SessionStats;
+  record: SubagentRecord;
+  toolFailures: number;
   completion?: "queue" | "continue";
   stoppedManually?: boolean;
 }

@@ -25,13 +25,13 @@ import {
 } from "@earendil-works/pi-ai";
 import { Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
-import type { JobManager } from "./manager.js";
+import type { SubagentManager } from "./manager.js";
 import {
   getLogDir,
   SUBAGENT_INDEX,
   SUBAGENT_SESSION_DIR,
   SUBAGENT_WORKTREES,
-  type BgJob,
+  type SubagentJob,
   type SubagentRecord,
   type TerminalState,
 } from "./types.js";
@@ -53,10 +53,13 @@ import {
   removeWorktree,
 } from "./worktree.js";
 
-export function registerSubagentModule(pi: ExtensionAPI, manager: JobManager) {
+export function registerSubagentModule(
+  pi: ExtensionAPI,
+  manager: SubagentManager,
+) {
   let modelRuntime: Promise<ModelRuntime> | undefined;
 
-  function statusDetails(record: SubagentRecord, job?: BgJob) {
+  function statusDetails(record: SubagentRecord, job?: SubagentJob) {
     const current = job ? manager.currentRecord(job) : record;
     const {
       ownerPid: _ownerPid,
@@ -120,7 +123,7 @@ export function registerSubagentModule(pi: ExtensionAPI, manager: JobManager) {
       "For high-level or non-technical requests ('check performance', 'audit security', 'investigate codebase'), delegate isolated sub-tasks to subagent.",
       "For independent tasks that don't depend on each other, spawn multiple subagents in one turn; each runs in the background and its result arrives as it finishes.",
       "For sequential work that builds on prior results, spawn one subagent, then spawn the next with the previous result in its prompt.",
-      "Use worktree:true for concurrent writing subagents; pi-background-agents creates but never merges or removes the branch/worktree.",
+      "Use worktree:true for concurrent writing subagents; pi-subagents creates but never merges or removes the branch/worktree.",
       "After starting a subagent, continue work immediately; NEVER execute sleep, loop, or poll commands to wait for completion. Return response to user or perform other tasks. Subagent results will arrive automatically when ready.",
     ],
     parameters: Type.Object({
@@ -240,9 +243,7 @@ export function registerSubagentModule(pi: ExtensionAPI, manager: JobManager) {
       };
       const findActiveSubagent = (id: string) =>
         findBySessionPrefix(
-          Array.from(manager.jobs.values()).filter(
-            (job) => job.kind === "subagent",
-          ),
+          Array.from(manager.jobs.values()),
           id,
           "running sessions",
         );
@@ -560,9 +561,7 @@ export function registerSubagentModule(pi: ExtensionAPI, manager: JobManager) {
 
       if (action === "status") {
         const active = new Map(
-          Array.from(manager.jobs.values())
-            .filter((job) => job.kind === "subagent" && job.record)
-            .map((job) => [job.sessionId!, job]),
+          Array.from(manager.jobs.values()).map((job) => [job.sessionId, job]),
         );
         const durableRecord = requestedId
           ? findDurableRecord(requestedId)
@@ -703,9 +702,9 @@ export function registerSubagentModule(pi: ExtensionAPI, manager: JobManager) {
         }
         if (existing) {
           // Only resume from paths this extension controls: the session file
-          // must be a regular file inside the pi-background-agents session
+          // must be a regular file inside the pi-subagents session
           // dir, and the cwd inside the parent project or a
-          // pi-background-agents worktree. A tampered index
+          // pi-subagents worktree. A tampered index
           // must not redirect the child elsewhere.
           let sessionFileReal = "";
           try {
@@ -891,7 +890,7 @@ export function registerSubagentModule(pi: ExtensionAPI, manager: JobManager) {
         }
         try {
           if (!existing) {
-            sessionManager.appendCustomEntry("pi-background-agents", {
+            sessionManager.appendCustomEntry("pi-subagents", {
               createdAt: new Date().toISOString(),
             });
             if (context === "fork")
@@ -975,7 +974,7 @@ export function registerSubagentModule(pi: ExtensionAPI, manager: JobManager) {
         context: existing?.context ?? context,
         ownerPid: process.pid,
       };
-      let job!: BgJob;
+      let job!: SubagentJob;
       try {
         job = {
           pid,
@@ -984,7 +983,6 @@ export function registerSubagentModule(pi: ExtensionAPI, manager: JobManager) {
           sessionId: session.sessionId,
           controller,
           forceDispose: forceDisposeChild,
-          kind: "subagent",
           session,
           activity: "starting",
           completion,

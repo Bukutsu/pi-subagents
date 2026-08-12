@@ -1,9 +1,9 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { JobManager } from "../src/manager.js";
+import { SubagentManager } from "../src/manager.js";
 
-test("killAllJobs aborts active jobs and pending setup", () => {
-  const manager = new JobManager({} as any);
+test("killAllJobs aborts active subagents and pending setup", () => {
+  const manager = new SubagentManager({} as any);
   const first = new AbortController();
   const second = new AbortController();
   const setup = new AbortController();
