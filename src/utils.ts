@@ -14,6 +14,7 @@ import {
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import {
   buildSessionContext,
+  getMarkdownTheme,
   truncateTail,
 } from "@earendil-works/pi-coding-agent";
 import type {
@@ -122,24 +123,8 @@ export function displayText(content: unknown, details: unknown) {
   return extractTextContent(content);
 }
 
-export function createMarkdownComponent(text: string, theme: Theme) {
-  const mdTheme = {
-    heading: (s: string) => theme.fg("toolTitle", theme.bold(s)),
-    link: (s: string) => theme.fg("accent", s),
-    linkUrl: (s: string) => theme.fg("dim", s),
-    code: (s: string) => theme.fg("accent", s),
-    codeBlock: (s: string) => theme.fg("toolOutput", s),
-    codeBlockBorder: (s: string) => theme.fg("dim", s),
-    quote: (s: string) => theme.fg("muted", s),
-    quoteBorder: (s: string) => theme.fg("dim", s),
-    hr: (s: string) => theme.fg("dim", s),
-    listBullet: (s: string) => theme.fg("accent", s),
-    bold: (s: string) => theme.bold(s),
-    italic: (s: string) => s,
-    strikethrough: (s: string) => s,
-    underline: (s: string) => s,
-  };
-  return new Markdown(text, 0, 0, mdTheme);
+export function createMarkdownComponent(text: string) {
+  return new Markdown(text, 0, 0, getMarkdownTheme());
 }
 
 export function renderToolResult(
@@ -152,13 +137,13 @@ export function renderToolResult(
     displayText(result.content, result.details).trim(),
   );
   if (!text) return new Text("", 0, 0);
-  if (options.expanded) return createMarkdownComponent(text, theme);
+  if (options.expanded) return createMarkdownComponent(text);
   const lines = text.split("\n");
   const preview = lines.slice(0, previewLines).join("\n");
   const hidden = lines.length - previewLines;
   const hint =
     hidden > 0 ? `\n${theme.fg("dim", `... (${hidden} more lines)`)}` : "";
-  return createMarkdownComponent(preview + hint, theme);
+  return createMarkdownComponent(preview + hint);
 }
 
 const TERMINAL_STATES = [

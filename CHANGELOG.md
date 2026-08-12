@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Render subagent output with pi's native markdown theme (syntax-highlighted code blocks and theme-customizable markdown colors).
 - Keep children running across session replacement (`/reload`, `/new`,
   `/resume`, `/fork`, `/clone`); results are handed to the next runtime of the
   origin session (matched by session id or file path), restored children show

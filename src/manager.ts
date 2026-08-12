@@ -150,14 +150,14 @@ export class SubagentManager {
 
         if (bodyText) {
           if (options.expanded) {
-            box.addChild(createMarkdownComponent(bodyText, theme));
+            box.addChild(createMarkdownComponent(bodyText));
           } else {
             const bodyLines = bodyText.split("\n");
             const preview = bodyLines.slice(0, 8).join("\n");
             const hidden = Math.max(0, bodyLines.length - 8);
             const hint =
               hidden > 0 ? `\n\n_${hidden} more lines (expand to view)_` : "";
-            box.addChild(createMarkdownComponent(preview + hint, theme));
+            box.addChild(createMarkdownComponent(preview + hint));
           }
         }
         return box;
