@@ -22,7 +22,7 @@
     "format:check": "prettier --check .",
     "check": "tsc -p tsconfig.json && prettier --check .",
     "test": "bun test",
-    "prepublishOnly": "npm run check"
+    "prepublishOnly": "npm run check && npm test"
   },
   "engines": {
     "node": ">=22"

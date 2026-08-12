@@ -32,23 +32,26 @@ pi install git:github.com/Bukutsu/pi-subagents
 The child runs in the background. Its result is delivered automatically when it
 finishes; do not poll `subagent status` or use shell sleep loops to wait.
 
+Use `/subagent` to list running children, `/subagent kill <pid>` to stop one, or
+`/subagent kill all` to stop every running child.
+
 ### Parameters
 
-| Name          | Purpose                                                            |
-| ------------- | ------------------------------------------------------------------ |
-| `action`      | `spawn`, `status`, `steer`, or `stop`                              |
-| `prompt`      | Task for a new or resumed session                                  |
-| `description` | Short label shown in status output                                 |
-| `sessionId`   | Durable session to resume, inspect, steer, or stop                 |
-| `message`     | Guidance queued after the current turn (`steer`)                   |
-| `completion`  | `continue` wakes the parent; `queue` waits for the next prompt     |
-| `model`       | Model from the active Pi model scope                               |
-| `thinking`    | `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, or `max`       |
-| `tools`       | Comma-separated allowlist that narrows inherited tools             |
-| `cwd`         | Existing directory inside the parent project                       |
-| `worktree`    | Create a persistent Git worktree for a new session                 |
-| `context`     | `project` for a fresh context, `fork` for sanitized parent history |
-| `timeoutSec`  | Maximum run time in seconds; defaults to 600                       |
+| Name          | Purpose                                                                    |
+| ------------- | -------------------------------------------------------------------------- |
+| `action`      | `spawn`, `status`, `steer`, or `stop`                                      |
+| `prompt`      | Task for a new or resumed session                                          |
+| `description` | Short label shown in status output                                         |
+| `sessionId`   | Durable session to resume, inspect, steer, or stop                         |
+| `message`     | Guidance queued after the current turn (`steer`)                           |
+| `completion`  | `continue` wakes the parent; `queue` does not start a new turn while idle  |
+| `model`       | Model from the active Pi model scope                                       |
+| `thinking`    | `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, or `max`               |
+| `tools`       | Comma-separated allowlist that narrows inherited tools                     |
+| `cwd`         | Existing directory inside the parent project; symlinks must stay inside it |
+| `worktree`    | Create a persistent Git worktree for a new session                         |
+| `context`     | `project` for a fresh context, `fork` for sanitized parent history         |
+| `timeoutSec`  | Maximum run time in seconds; defaults to 600                               |
 
 When several subagents are independent, spawn them in one turn. Use a separate
 Git worktree for concurrent edits. Worktrees are left on disk for review and
@@ -90,7 +93,8 @@ ignored and the child uses the parent's model.
 | Temporary long-output logs | Operating-system temp directory      |
 
 The storage directories are private. A running child is stopped when the Pi
-session shuts down; completed sessions remain resumable.
+session shuts down; completed sessions remain resumable. Sessions created by
+older `pi-background-agents` releases remain readable and resumable.
 
 ## Development
 

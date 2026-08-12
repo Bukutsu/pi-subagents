@@ -1,7 +1,6 @@
-import {
-  isToolCallEventType,
-  type ExtensionAPI,
-  type ExtensionContext,
+import type {
+  ExtensionAPI,
+  ExtensionContext,
 } from "@earendil-works/pi-coding-agent";
 import {
   Box,
@@ -30,41 +29,6 @@ import {
 const BRAILLE = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 const WIDGET_REFRESH_MS = 200;
 
-// A bash call is a wait when any statement of the command chain is a bare
-// sleep, a watch loop, or a loop body/loop construct that sleeps (statement
-// splitting on `;` turns `while true; do sleep 1; done` into `while true`,
-// `do sleep 1`, `done`, which the `do sleep` rule catches).
-const WAITING_STATEMENT_RE = [
-  /^sleep\s+\d+(?:\.\d+)?(?:s|m|h)?$/i,
-  /^watch\s+/i,
-  /^do\s+sleep\b/i,
-  /^(?:while|until)\b[\s\S]*\bsleep\b/i,
-  /^for\b[\s\S]*\bsleep\b/i,
-];
-
-/**
- * Blocks bash sleep/polling loops at the tool boundary. Subagent results are
- * delivered automatically, so waiting model calls waste turns.
- */
-export function registerWaitBlocker(pi: ExtensionAPI) {
-  pi.on("tool_call", (event) => {
-    if (!isToolCallEventType("bash", event)) return;
-    const command = event.input.command ?? "";
-    const statements = command.split(/(?:&&|\|\||;|\n|\||&)/);
-    for (const raw of statements) {
-      const statement = raw.trim();
-      if (!statement) continue;
-      if (WAITING_STATEMENT_RE.some((re) => re.test(statement))) {
-        return {
-          block: true,
-          reason:
-            "Do not use sleep or polling loops to wait for subagents; results arrive automatically when ready. Continue other work instead.",
-        };
-      }
-    }
-  });
-}
-
 export class SubagentManager {
   public jobs = new Map<number, SubagentJob>();
   public nextVirtualPid = 1;
@@ -79,6 +43,8 @@ export class SubagentManager {
     message: string;
     completion: "queue" | "continue";
     expectedGeneration: number;
+    originLeafId: string | null;
+    triggerTurn: boolean;
   }> = [];
 
   constructor(public pi: ExtensionAPI) {}
@@ -98,7 +64,6 @@ export class SubagentManager {
 
     this.registerMessageRenderer();
     this.registerLifecycleEvents();
-    registerWaitBlocker(this.pi);
   }
 
   private registerMessageRenderer() {
@@ -168,6 +133,10 @@ export class SubagentManager {
       }
     });
 
+    this.pi.on("agent_settled", (_event, ctx) => {
+      this.flushPendingCompletions(ctx);
+    });
+
     this.pi.on("session_shutdown", async () => {
       this.shuttingDown = true;
       this.lifecycle.abort();
@@ -205,10 +174,11 @@ export class SubagentManager {
           timeoutPromise,
         ]);
         if (shutdownTimedOut) {
-          for (const job of this.jobs.values()) {
+          for (const [pid, job] of this.jobs) {
             try {
-              job.forceDispose();
+              job.forceCleanup();
             } catch {}
+            this.jobs.delete(pid);
           }
         }
       } finally {
@@ -330,20 +300,39 @@ export class SubagentManager {
     }
   }
 
+  private canDeliverToOrigin(
+    originLeafId: string | null,
+    ctx: ExtensionContext,
+  ) {
+    if (originLeafId === null) return ctx.sessionManager.getLeafId() === null;
+    return ctx.sessionManager
+      .getBranch()
+      .some((entry) => entry.id === originLeafId);
+  }
+
   private sendCompletionMessage(
     message: string,
     completion: "queue" | "continue",
+    originLeafId: string | null,
+    triggerTurn: boolean,
     ctx: ExtensionContext,
   ) {
+    if (!this.canDeliverToOrigin(originLeafId, ctx)) return;
+    const idle = ctx.isIdle();
+    if (!triggerTurn && !idle) throw new Error("Parent turn is still active");
+    const options =
+      completion === "queue"
+        ? idle
+          ? { triggerTurn: false as const }
+          : { deliverAs: "followUp" as const }
+        : { deliverAs: "steer" as const, triggerTurn };
     this.pi.sendMessage(
       {
         customType: "pi-subagent-result",
         content: sanitizeTerminalOutput(message),
         display: true,
       },
-      completion === "queue"
-        ? { deliverAs: "nextTurn" }
-        : { deliverAs: "steer", triggerTurn: ctx.isIdle() },
+      options,
     );
   }
 
@@ -351,11 +340,27 @@ export class SubagentManager {
     this.currentCtx = ctx;
     while (this.pendingCompletions.length > 0) {
       const item = this.pendingCompletions.shift()!;
-      if (!this.shuttingDown && this.generation === item.expectedGeneration) {
+      if (
+        !this.shuttingDown &&
+        this.generation === item.expectedGeneration &&
+        this.canDeliverToOrigin(item.originLeafId, ctx)
+      ) {
+        if (!item.triggerTurn && !ctx.isIdle()) {
+          this.pendingCompletions.unshift(item);
+          return;
+        }
         try {
-          this.sendCompletionMessage(item.message, item.completion, ctx);
+          this.sendCompletionMessage(
+            item.message,
+            item.completion,
+            item.originLeafId,
+            item.triggerTurn,
+            ctx,
+          );
         } catch (error) {
+          this.pendingCompletions.unshift(item);
           console.warn("Could not deliver pending subagent result:", error);
+          break;
         }
       }
     }
@@ -380,25 +385,38 @@ export class SubagentManager {
     message: string,
     completion: "queue" | "continue",
     expectedGeneration: number,
+    originLeafId: string | null,
+    triggerTurn = true,
   ) {
     if (this.shuttingDown || this.generation !== expectedGeneration) return;
     const active = this.currentCtx;
-    if (!active) {
+    if (!active || (!triggerTurn && !active.isIdle())) {
       this.pendingCompletions.push({
         message,
         completion,
         expectedGeneration,
+        originLeafId,
+        triggerTurn,
       });
       return;
     }
+    if (!this.canDeliverToOrigin(originLeafId, active)) return;
     try {
-      this.sendCompletionMessage(message, completion, active);
+      this.sendCompletionMessage(
+        message,
+        completion,
+        originLeafId,
+        triggerTurn,
+        active,
+      );
     } catch (error) {
       console.warn("Could not deliver subagent result:", error);
       this.pendingCompletions.push({
         message,
         completion,
         expectedGeneration,
+        originLeafId,
+        triggerTurn,
       });
     }
   }

@@ -11,7 +11,7 @@ import {
   statSync,
   writeFileSync,
 } from "node:fs";
-import { isAbsolute, join, relative, resolve } from "node:path";
+import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import { buildSessionContext } from "@earendil-works/pi-coding-agent";
 import type {
   AgentToolResult,
@@ -21,8 +21,14 @@ import type {
 } from "@earendil-works/pi-coding-agent";
 import { Markdown, Text } from "@earendil-works/pi-tui";
 import {
+  LEGACY_SUBAGENT_INDEX,
+  LEGACY_SUBAGENT_LOCKS,
+  LEGACY_SUBAGENT_SESSION_DIR,
+  LEGACY_SUBAGENT_WORKTREES,
   SUBAGENT_INDEX,
   SUBAGENT_LOCKS,
+  SUBAGENT_SESSION_DIR,
+  SUBAGENT_WORKTREES,
   type SubagentRecord,
 } from "./types.js";
 
@@ -150,22 +156,35 @@ export function isSubagentRecord(value: unknown): value is SubagentRecord {
 
 export function readIndex(): Record<string, SubagentRecord> {
   const records: Record<string, SubagentRecord> = Object.create(null);
-  if (!existsSync(SUBAGENT_INDEX)) return records;
-  try {
-    for (const entry of readdirSync(SUBAGENT_INDEX, { withFileTypes: true })) {
-      if (!entry.isFile() || !entry.name.endsWith(".json")) continue;
-      try {
-        const record = JSON.parse(
-          readFileSync(join(SUBAGENT_INDEX, entry.name), "utf8"),
-        ) as unknown;
-        if (!isSubagentRecord(record)) throw new Error("invalid record");
-        records[record.sessionId] = record;
-      } catch (error) {
-        console.warn(`Ignoring invalid subagent record ${entry.name}:`, error);
+  for (const indexDir of [LEGACY_SUBAGENT_INDEX, SUBAGENT_INDEX]) {
+    if (!existsSync(indexDir)) continue;
+    try {
+      for (const entry of readdirSync(indexDir, { withFileTypes: true })) {
+        if (!entry.isFile() || !entry.name.endsWith(".json")) continue;
+        try {
+          const record = JSON.parse(
+            readFileSync(join(indexDir, entry.name), "utf8"),
+          ) as unknown;
+          if (!isSubagentRecord(record)) throw new Error("invalid record");
+          // New records win when a legacy index contains the same session ID.
+          if (
+            !Object.hasOwn(records, record.sessionId) ||
+            indexDir === SUBAGENT_INDEX
+          )
+            records[record.sessionId] = record;
+        } catch (error) {
+          console.warn(
+            `Ignoring invalid subagent record ${entry.name}:`,
+            error,
+          );
+        }
       }
+    } catch (error) {
+      console.warn(
+        `Could not read subagent index directory ${indexDir}:`,
+        error,
+      );
     }
-  } catch (error) {
-    console.warn("Could not read subagent index directory:", error);
   }
   return records;
 }
@@ -278,11 +297,14 @@ export function processIsAlive(pid?: number) {
   }
 }
 
-export function acquireSessionLock(sessionId: string) {
+export function acquireSessionLock(
+  sessionId: string,
+  lockDir: string = SUBAGENT_LOCKS,
+) {
   if (!/^[a-zA-Z0-9-]+$/.test(sessionId))
     throw new Error(`Invalid subagent session ID: ${sessionId}`);
-  ensurePrivateDir(SUBAGENT_LOCKS);
-  const lock = join(SUBAGENT_LOCKS, sessionId);
+  ensurePrivateDir(lockDir);
+  const lock = join(lockDir, sessionId);
   for (let attempt = 0; attempt < 3; attempt++) {
     try {
       const tmp = `${lock}.tmp-${randomUUID()}`;
@@ -334,16 +356,50 @@ export function getScopedModels(ctx: ExtensionContext) {
   return ctx.scopedModels ?? [];
 }
 
+export function isPathInside(root: string, target: string) {
+  let realRoot: string;
+  let realTarget: string;
+  try {
+    realRoot = realpathSync(root);
+    realTarget = realpathSync(target);
+  } catch {
+    return false;
+  }
+  const pathFromRoot = relative(realRoot, realTarget);
+  return (
+    pathFromRoot === "" ||
+    (!pathFromRoot.startsWith(`..${sep}`) &&
+      pathFromRoot !== ".." &&
+      !isAbsolute(pathFromRoot))
+  );
+}
+
+export function isPathInsideAny(roots: string[], target: string) {
+  return roots.some((root) => isPathInside(root, target));
+}
+
+export const SUBAGENT_SESSION_ROOTS = [
+  SUBAGENT_SESSION_DIR,
+  LEGACY_SUBAGENT_SESSION_DIR,
+];
+
+export const SUBAGENT_WORKTREE_ROOTS = [
+  SUBAGENT_WORKTREES,
+  LEGACY_SUBAGENT_WORKTREES,
+];
+
 export function resolveSubagentCwd(parent: string, requested?: string) {
   // Models sometimes emit a leading @ in tool path arguments; strip it before
   // resolving (built-in tools follow the same convention).
   const target = resolve(parent, requested?.trim().replace(/^@/, "") || ".");
-  let realTarget = target;
+  let realTarget: string;
   try {
     realTarget = realpathSync(target);
-  } catch {}
-  if (!existsSync(realTarget))
-    throw new Error(`cwd does not exist: ${realTarget}`);
+  } catch {
+    throw new Error(`cwd does not exist: ${target}`);
+  }
+  if (!isPathInside(parent, realTarget))
+    throw new Error(`cwd must remain inside the parent project: ${realTarget}`);
   if (!statSync(realTarget).isDirectory())
     throw new Error(`cwd is not a directory: ${realTarget}`);
   return realTarget;

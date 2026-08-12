@@ -2,6 +2,27 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { SubagentManager } from "../src/manager.js";
 
+test("does not deliver results after navigating away from the origin branch", () => {
+  const messages: unknown[] = [];
+  const manager = new SubagentManager({
+    sendMessage: (message: unknown) => messages.push(message),
+  } as any);
+  manager.shuttingDown = false;
+  manager.generation = 1;
+  const ctx: any = {
+    isIdle: () => true,
+    sessionManager: {
+      getLeafId: () => "leaf-2",
+      getBranch: () => [{ id: "leaf-2" }],
+    },
+  };
+  manager.currentCtx = ctx;
+
+  manager.deliverCompletion("result", "continue", 1, "leaf-1");
+
+  assert.equal(messages.length, 0);
+});
+
 test("killAllJobs aborts active subagents and pending setup", () => {
   const manager = new SubagentManager({} as any);
   const first = new AbortController();

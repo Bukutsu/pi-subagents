@@ -25,6 +25,17 @@ export const SUBAGENT_INDEX = join(SUBAGENT_DIR, "index");
 export const SUBAGENT_LOCKS = join(SUBAGENT_DIR, "locks");
 export const SUBAGENT_WORKTREES = join(SUBAGENT_DIR, "worktrees");
 
+// Preserve access to sessions created before the package was renamed from
+// pi-background-agents. New records continue to use the pi-subagents paths.
+export const LEGACY_SUBAGENT_DIR = join(getAgentDir(), "pi-background-agents");
+export const LEGACY_SUBAGENT_SESSION_DIR = join(
+  LEGACY_SUBAGENT_DIR,
+  "sessions",
+);
+export const LEGACY_SUBAGENT_INDEX = join(LEGACY_SUBAGENT_DIR, "index");
+export const LEGACY_SUBAGENT_LOCKS = join(LEGACY_SUBAGENT_DIR, "locks");
+export const LEGACY_SUBAGENT_WORKTREES = join(LEGACY_SUBAGENT_DIR, "worktrees");
+
 export type TerminalState =
   "finished" | "failed" | "stopped" | "timed-out" | "interrupted";
 
@@ -55,7 +66,7 @@ export interface SubagentJob {
   startedAt: number;
   sessionId: string;
   controller: AbortController;
-  forceDispose: () => void;
+  forceCleanup: () => void;
   session: AgentSession;
   activity?: string;
   baseline: SessionStats;

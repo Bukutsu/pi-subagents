@@ -28,7 +28,10 @@ import { Type } from "typebox";
 import type { SubagentManager } from "./manager.js";
 import {
   getLogDir,
+  LEGACY_SUBAGENT_LOCKS,
+  LEGACY_SUBAGENT_SESSION_DIR,
   SUBAGENT_INDEX,
+  SUBAGENT_LOCKS,
   SUBAGENT_SESSION_DIR,
   SUBAGENT_WORKTREES,
   type SubagentJob,
@@ -39,12 +42,16 @@ import {
   acquireSessionLock,
   extractTextContent,
   getScopedModels,
+  isPathInside,
+  isPathInsideAny,
   readIndex,
   renderToolResult,
   resolveSubagentCwd,
   sanitizeTerminalOutput,
   sanitizeForkMessages,
   saveRecord,
+  SUBAGENT_SESSION_ROOTS,
+  SUBAGENT_WORKTREE_ROOTS,
 } from "./utils.js";
 import {
   createWorktree,
@@ -52,6 +59,25 @@ import {
   getGitCommonDir,
   removeWorktree,
 } from "./worktree.js";
+
+const ABORT_GRACE_MS = 5000;
+
+function awaitWithoutCancelling<T>(
+  promise: Promise<T>,
+  signal?: AbortSignal,
+): Promise<T> {
+  if (!signal) return promise;
+  if (signal.aborted)
+    return Promise.reject(new Error("Subagent setup was cancelled"));
+  let onAbort: (() => void) | undefined;
+  const cancellation = new Promise<never>((_, reject) => {
+    onAbort = () => reject(new Error("Subagent setup was cancelled"));
+    signal.addEventListener("abort", onAbort, { once: true });
+  });
+  return Promise.race([promise, cancellation]).finally(() => {
+    if (onAbort) signal.removeEventListener("abort", onAbort);
+  });
+}
 
 export function registerSubagentModule(
   pi: ExtensionAPI,
@@ -108,6 +134,61 @@ export function registerSubagentModule(
     return cards.join("\n\n");
   }
 
+  pi.registerCommand("subagent", {
+    description: "List and manage background subagents",
+    getArgumentCompletions: (prefix) => {
+      const items = [
+        {
+          value: "kill all",
+          label: "kill all",
+          description: "Stop all subagents",
+        },
+        ...Array.from(manager.jobs.values(), (job) => ({
+          value: `kill ${job.pid}`,
+          label: `kill ${job.pid}`,
+          description: job.command,
+        })),
+      ].filter((item) => item.value.startsWith(prefix));
+      return items.length ? items : null;
+    },
+    handler: async (args, ctx) => {
+      manager.currentCtx = ctx;
+      const trimmed = args?.trim() ?? "";
+      if (/^kill\s+all$/i.test(trimmed)) {
+        const stopped = manager.killAllJobs();
+        ctx.ui.notify(
+          `Stopped ${stopped} subagent${stopped === 1 ? "" : "s"}`,
+          "info",
+        );
+        manager.syncStatus(ctx);
+        return;
+      }
+      const killMatch = trimmed.match(/^kill\s+(\d+)$/i);
+      if (killMatch) {
+        const pid = Number(killMatch[1]);
+        if (manager.killJob(pid)) {
+          ctx.ui.notify(`Stopped subagent ${pid}`, "info");
+          manager.syncStatus(ctx);
+        } else {
+          ctx.ui.notify(`No subagent found with ID ${pid}`, "error");
+        }
+        return;
+      }
+      if (trimmed.startsWith("kill")) {
+        ctx.ui.notify("Usage: /subagent kill <pid>", "error");
+        return;
+      }
+      if (trimmed) {
+        ctx.ui.notify(
+          `Unknown /subagent command: ${sanitizeTerminalOutput(trimmed)}`,
+          "error",
+        );
+        return;
+      }
+      if (ctx.hasUI) await manager.manageJobs(ctx);
+    },
+  });
+
   pi.registerTool({
     name: "subagent",
     label: "Subagent",
@@ -153,7 +234,7 @@ export function registerSubagentModule(
       completion: Type.Optional(
         StringEnum(["queue", "continue"] as const, {
           description:
-            "continue wakes the parent turn automatically when ready (default); queue waits for user's next message",
+            "continue wakes the parent turn automatically when ready (default); queue does not start a new turn while the parent is idle",
         }),
       ),
       model: Type.Optional(
@@ -225,6 +306,7 @@ export function registerSubagentModule(
       ctx,
     ) {
       manager.currentCtx = ctx;
+      const originLeafId = ctx.sessionManager.getLeafId();
       const requestedId = sessionId?.trim();
       const durable = readIndex();
       const findBySessionPrefix = <T extends { sessionId?: string }>(
@@ -273,14 +355,14 @@ export function registerSubagentModule(
       };
       const setupChildSession = async (opts: ChildSetupOptions) => {
         const { existing = false, checkSetup, shutdownHandler } = opts;
-        modelRuntime ??= ModelRuntime.create();
-        let runtime: ModelRuntime;
-        try {
-          runtime = await modelRuntime;
-        } catch (error) {
-          modelRuntime = undefined;
-          throw error;
-        }
+        const runtimePromise = (modelRuntime ??= ModelRuntime.create());
+        void runtimePromise.catch(() => {
+          if (modelRuntime === runtimePromise) modelRuntime = undefined;
+        });
+        const runtime = await awaitWithoutCancelling(
+          runtimePromise,
+          opts.setupSignal,
+        );
         checkSetup?.();
         for (const providerId of ctx.modelRegistry.getRegisteredProviderIds()) {
           try {
@@ -370,9 +452,21 @@ export function registerSubagentModule(
           throw new Error(
             `Tools are not active in the parent session: ${unknownTools.join(", ")}`,
           );
-        const childTools = requestedTools?.length
+        const explicitTools = requestedTools?.length
           ? requestedTools
-          : parentTools;
+          : undefined;
+        const temporaryExtensionPaths = [
+          ...new Set(
+            pi
+              .getAllTools()
+              .filter(
+                (tool) =>
+                  tool.sourceInfo.scope === "temporary" &&
+                  !tool.sourceInfo.path.startsWith("<"),
+              )
+              .map((tool) => tool.sourceInfo.path),
+          ),
+        ];
         const requestedThinking = opts.thinking ?? resolvedThinking;
         const scopedEntry =
           !resolvedModel && !existing
@@ -406,6 +500,9 @@ export function registerSubagentModule(
             cwd: opts.cwd,
             agentDir,
             settingsManager,
+            ...(temporaryExtensionPaths.length
+              ? { additionalExtensionPaths: temporaryExtensionPaths }
+              : {}),
             agentsFilesOverride: (base) => ({
               agentsFiles: base.agentsFiles.filter((f) =>
                 f.path.startsWith(agentDir + sep),
@@ -417,17 +514,26 @@ export function registerSubagentModule(
           resourceLoader.extendResources = () => {};
           await resourceLoader.reload();
           checkSetup?.();
+        } else if (temporaryExtensionPaths.length) {
+          resourceLoader = new DefaultResourceLoader({
+            cwd: opts.cwd,
+            agentDir: getAgentDir(),
+            settingsManager,
+            additionalExtensionPaths: temporaryExtensionPaths,
+          });
+          await resourceLoader.reload();
+          checkSetup?.();
         }
         const setupController = new AbortController();
         let created: Awaited<ReturnType<typeof createAgentSession>> | undefined;
         try {
           created = await createAgentSession({
             cwd: opts.cwd,
-            tools: childTools,
             modelRuntime: runtime,
             sessionManager: opts.sessionManager,
             settingsManager,
             ...(resourceLoader ? { resourceLoader } : {}),
+            ...(explicitTools ? { tools: explicitTools } : {}),
             ...(selectedModel ? { model: selectedModel } : {}),
             ...(!existing
               ? { thinkingLevel: effectiveThinking as ThinkingLevel }
@@ -522,27 +628,41 @@ export function registerSubagentModule(
           await dispose();
           throw new Error("Subagent session did not initialize a model");
         }
-        const actualTools = session.getActiveToolNames();
-        const missingTools = childTools.filter(
-          (name) => !actualTools.includes(name),
-        );
-        const unexpectedTools = actualTools.filter(
-          (name) => !childTools.includes(name),
-        );
-        if (missingTools.length || unexpectedTools.length) {
-          await dispose();
-          throw new Error(
-            [
-              missingTools.length
-                ? `Requested parent tools were not available in the child: ${missingTools.join(", ")}`
-                : "",
-              unexpectedTools.length
-                ? `Child enabled unexpected tools: ${unexpectedTools.join(", ")}`
-                : "",
-            ]
-              .filter(Boolean)
-              .join("; "),
+        let actualTools = session.getActiveToolNames();
+        let toolInheritanceWarning: string | undefined;
+        if (explicitTools) {
+          const missingTools = explicitTools.filter(
+            (name) => !actualTools.includes(name),
           );
+          const unexpectedTools = actualTools.filter(
+            (name) => !explicitTools.includes(name),
+          );
+          if (missingTools.length || unexpectedTools.length) {
+            await dispose();
+            throw new Error(
+              [
+                missingTools.length
+                  ? `Requested parent tools were not available in the child: ${missingTools.join(", ")}`
+                  : "",
+                unexpectedTools.length
+                  ? `Child enabled unexpected tools: ${unexpectedTools.join(", ")}`
+                  : "",
+              ]
+                .filter(Boolean)
+                .join("; "),
+            );
+          }
+        } else {
+          const unavailableTools = parentTools.filter(
+            (name) => !actualTools.includes(name),
+          );
+          const inheritedTools = parentTools.filter((name) =>
+            actualTools.includes(name),
+          );
+          session.setActiveToolsByName(inheritedTools);
+          actualTools = session.getActiveToolNames();
+          if (unavailableTools.length)
+            toolInheritanceWarning = `Child tools unavailable and omitted: ${unavailableTools.join(", ")}`;
         }
         const modelFallbackMessage = [
           modelRequestWarning,
@@ -553,6 +673,7 @@ export function registerSubagentModule(
         return {
           session,
           modelFallbackMessage: modelFallbackMessage || undefined,
+          toolInheritanceWarning,
           actualTools,
           dispose,
           forceDispose,
@@ -686,6 +807,8 @@ export function registerSubagentModule(
         }),
       );
       let existing: SubagentRecord | undefined;
+      let validatedSessionFile: string | undefined;
+      let validatedCwd: string | undefined;
       try {
         existing = requestedId ? findDurableRecord(requestedId) : undefined;
         if (requestedId && !existing)
@@ -710,29 +833,26 @@ export function registerSubagentModule(
           try {
             sessionFileReal = realpathSync(existing.sessionFile);
           } catch {}
-          const sessionDirReal = realpathSync(SUBAGENT_SESSION_DIR);
           if (
-            !sessionFileReal.startsWith(sessionDirReal + sep) ||
+            !sessionFileReal ||
+            !isPathInsideAny(SUBAGENT_SESSION_ROOTS, sessionFileReal) ||
             !statSync(sessionFileReal).isFile()
           ) {
             throw new Error(
               `Cannot resume subagent ${requestedId}: session file is not a regular file inside ${SUBAGENT_SESSION_DIR}: ${existing.sessionFile}`,
             );
           }
+          validatedSessionFile = sessionFileReal;
           if (existing.branch) {
-            let cwdReal = "";
-            try {
-              cwdReal = realpathSync(existing.cwd);
-            } catch {}
-            const worktreesReal = realpathSync(SUBAGENT_WORKTREES);
-            if (!cwdReal.startsWith(worktreesReal + sep)) {
+            if (!isPathInsideAny(SUBAGENT_WORKTREE_ROOTS, existing.cwd)) {
               throw new Error(
                 `Cannot resume subagent ${requestedId}: worktree cwd is outside ${SUBAGENT_WORKTREES}: ${existing.cwd}`,
               );
             }
+            validatedCwd = realpathSync(existing.cwd);
             const [parentGitDir, worktreeGitDir] = await Promise.all([
               getGitCommonDir(pi, ctx.cwd, setupSignal),
-              getGitCommonDir(pi, existing.cwd, setupSignal),
+              getGitCommonDir(pi, validatedCwd, setupSignal),
             ]);
             if (!parentGitDir || parentGitDir !== worktreeGitDir) {
               throw new Error(
@@ -741,7 +861,7 @@ export function registerSubagentModule(
             }
             const worktreeBranch = await getGitBranch(
               pi,
-              existing.cwd,
+              validatedCwd,
               setupSignal,
             );
             if (worktreeBranch !== existing.branch) {
@@ -749,12 +869,13 @@ export function registerSubagentModule(
                 `Cannot resume subagent ${requestedId}: worktree is not on branch ${existing.branch}`,
               );
             }
-          } else if (
-            resolveSubagentCwd(ctx.cwd, existing.cwd) !== existing.cwd
-          ) {
-            throw new Error(
-              `Cannot resume subagent ${requestedId}: saved cwd is outside the parent project: ${existing.cwd}`,
-            );
+          } else {
+            const resolvedCwd = resolveSubagentCwd(ctx.cwd, existing.cwd);
+            if (resolvedCwd !== existing.cwd)
+              throw new Error(
+                `Cannot resume subagent ${requestedId}: saved cwd is outside the parent project: ${existing.cwd}`,
+              );
+            validatedCwd = resolvedCwd;
           }
         }
       } catch (error) {
@@ -767,7 +888,7 @@ export function registerSubagentModule(
       let isNewWorktree = false;
       try {
         if (existing) {
-          childCwd = existing.cwd;
+          childCwd = validatedCwd ?? existing.cwd;
           if (cwd) {
             const resolvedCwd = resolveSubagentCwd(ctx.cwd, cwd);
             if (resolvedCwd !== childCwd) {
@@ -792,12 +913,14 @@ export function registerSubagentModule(
 
       let session: Awaited<ReturnType<typeof createAgentSession>>["session"];
       let modelFallbackMessage: string | undefined;
+      let toolInheritanceWarning: string | undefined;
       let sessionFile: string;
       let sessionLock: string;
       let controller = new AbortController();
       let actualTools: string[];
       let disposeChild: () => Promise<void> = async () => {};
       let forceDisposeChild: () => void = () => {};
+      let forceCleanupChild: () => void = () => {};
       let sessionManager!: SessionManager;
       // Fresh sessions that fail before registration would leave an
       // unindexed session file; remove it so nothing orphaned accumulates.
@@ -817,11 +940,25 @@ export function registerSubagentModule(
             rmSync(sessionLock, { recursive: true, force: true });
           } catch {}
         };
+        forceCleanupChild = () => {
+          try {
+            forceDisposeChild();
+          } finally {
+            removeLock();
+          }
+        };
         try {
-          if (existing) sessionLock = acquireSessionLock(existing.sessionId);
+          if (existing) {
+            const lockDir =
+              validatedSessionFile &&
+              isPathInside(LEGACY_SUBAGENT_SESSION_DIR, validatedSessionFile)
+                ? LEGACY_SUBAGENT_LOCKS
+                : SUBAGENT_LOCKS;
+            sessionLock = acquireSessionLock(existing.sessionId, lockDir);
+          }
           sessionManager = existing
             ? SessionManager.open(
-                existing.sessionFile,
+                validatedSessionFile ?? existing.sessionFile,
                 SUBAGENT_SESSION_DIR,
                 childCwd,
               )
@@ -874,6 +1011,7 @@ export function registerSubagentModule(
           throw new Error("Child session setup returned no session");
         session = prepared.session;
         modelFallbackMessage = prepared.modelFallbackMessage;
+        toolInheritanceWarning = prepared.toolInheritanceWarning;
         actualTools = prepared.actualTools;
         forceDisposeChild = prepared.forceDispose;
         disposeChild = async () => {
@@ -944,9 +1082,14 @@ export function registerSubagentModule(
           (prompt.length > 30 ? `${prompt.slice(0, 30)}...` : prompt),
       );
       const displayModel = `${session.model.provider}/${session.model.id}`;
-      const fallback = modelFallbackMessage
-        ? `\nModel fallback: ${modelFallbackMessage}`
-        : "";
+      const fallback = [
+        modelFallbackMessage ? `\nModel fallback: ${modelFallbackMessage}` : "",
+        toolInheritanceWarning
+          ? `\nTool inheritance: ${toolInheritanceWarning}`
+          : "",
+      ]
+        .filter(Boolean)
+        .join("");
       const now = new Date().toISOString();
       const record: SubagentRecord = {
         sessionId: session.sessionId,
@@ -982,7 +1125,7 @@ export function registerSubagentModule(
           startedAt: Date.now(),
           sessionId: session.sessionId,
           controller,
-          forceDispose: forceDisposeChild,
+          forceCleanup: forceCleanupChild,
           session,
           activity: "starting",
           completion,
@@ -1076,10 +1219,38 @@ export function registerSubagentModule(
       const done = (async () => {
         try {
           let thrown: string | undefined;
+          let forcedStop = false;
+          const promptDone = Promise.resolve()
+            .then(() => session.prompt(prompt))
+            .catch((error) => {
+              thrown = error instanceof Error ? error.message : String(error);
+            });
+          let abortGraceTimer: ReturnType<typeof setTimeout> | undefined;
+          let abortListener: (() => void) | undefined;
+          const forcedStopDone = new Promise<void>((resolve) => {
+            abortListener = () => {
+              abortGraceTimer = setTimeout(() => {
+                forcedStop = true;
+                resolve();
+              }, ABORT_GRACE_MS);
+              abortGraceTimer.unref();
+            };
+            if (controller.signal.aborted) abortListener();
+            else
+              controller.signal.addEventListener("abort", abortListener, {
+                once: true,
+              });
+          });
           try {
-            await session.prompt(prompt);
-          } catch (error) {
-            thrown = error instanceof Error ? error.message : String(error);
+            await Promise.race([promptDone, forcedStopDone]);
+          } finally {
+            if (abortListener)
+              controller.signal.removeEventListener("abort", abortListener);
+            if (abortGraceTimer) clearTimeout(abortGraceTimer);
+          }
+          if (forcedStop) {
+            forceCleanupChild();
+            thrown ??= `Subagent did not stop after cancellation (${ABORT_GRACE_MS / 1000}s grace period)`;
           }
           const assistant = lastAssistantMessage;
           const stopped = cancelled || assistant?.stopReason === "aborted";
@@ -1157,20 +1328,28 @@ export function registerSubagentModule(
             ? `\n\n${truncated.content}`
             : "";
           const reasonText = reason ? `\n\nReason: ${reason}` : "";
-          if (!job.stoppedManually) {
-            manager.deliverCompletion(
-              `${header}${mainContent}${truncationNote}${reasonText}${recovery}${fallback}${badge}`,
-              job.completion ?? "continue",
-              expectedGeneration,
-            );
-          }
+          manager.deliverCompletion(
+            `${header}${mainContent}${truncationNote}${reasonText}${recovery}${fallback}${badge}`,
+            job.stoppedManually ? "queue" : (job.completion ?? "continue"),
+            expectedGeneration,
+            originLeafId,
+            !job.stoppedManually,
+          );
         } finally {
           clearTimeout(timer);
           if (activityTimer) clearTimeout(activityTimer);
           unsubscribe();
-          await disposeChild();
-          manager.jobs.delete(pid);
-          manager.syncStatus(ctx);
+          try {
+            await disposeChild();
+          } catch (error) {
+            console.warn(
+              `Could not dispose subagent ${session.sessionId}:`,
+              error,
+            );
+          } finally {
+            manager.jobs.delete(pid);
+            manager.syncStatus(ctx);
+          }
         }
       })();
       manager.track(done);
@@ -1178,7 +1357,7 @@ export function registerSubagentModule(
       const location = branch ? `\nBranch: ${branch}` : "";
       const queueMsg =
         completion === "queue"
-          ? " Output queued for next turn."
+          ? " Output queued without starting a new turn while idle."
           : " The result will arrive automatically.";
       return {
         content: [
@@ -1199,6 +1378,9 @@ export function registerSubagentModule(
           ...(branch ? { branch } : {}),
           ...(modelFallbackMessage
             ? { modelFallback: modelFallbackMessage }
+            : {}),
+          ...(toolInheritanceWarning
+            ? { toolWarning: toolInheritanceWarning }
             : {}),
         },
       };

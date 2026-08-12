@@ -1,12 +1,14 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { registerWaitBlocker } from "../src/manager.js";
 import { registerSubagentModule } from "../src/subagent.js";
 
 function setup() {
   const tools: any[] = [];
+  const commands: any[] = [];
   const pi: any = {
     registerTool: (tool: any) => tools.push(tool),
+    registerCommand: (name: string, command: any) =>
+      commands.push({ name, command }),
     registerMessageRenderer() {},
     getActiveTools: () => ["read", "bash", "subagent"],
   };
@@ -26,50 +28,14 @@ function setup() {
     currentRecord: () => undefined,
   };
   registerSubagentModule(pi, manager);
-  return { tools, manager };
+  return { tools, commands, manager };
 }
 
-test("blocks sleep and polling loops in bash tool calls", async () => {
-  const handlers: Array<{ name: string; handler: (event: any) => any }> = [];
-  const pi: any = {
-    on(name: string, handler: (event: any) => any) {
-      handlers.push({ name, handler });
-    },
-  };
-  registerWaitBlocker(pi);
-  const toolCall = handlers.find((h) => h.name === "tool_call");
-  assert.ok(toolCall);
-  const run = (event: any) => toolCall.handler(event);
-
-  assert.equal(
-    await run({ toolName: "bash", input: { command: "ls -la" } }),
-    undefined,
-  );
-  assert.equal(
-    await run({ toolName: "bash", input: { command: "rg -n sleep src" } }),
-    undefined,
-  );
-  assert.equal(
-    await run({ toolName: "bash", input: { command: "timeout 30 npm test" } }),
-    undefined,
-  );
-
-  for (const command of [
-    "sleep 5",
-    "sleep 0.1 && subagent status",
-    "while true; do sleep 1; done",
-    "for i in {1..10}; do sleep 1; done",
-  ]) {
-    const result = await run({ toolName: "bash", input: { command } });
-    assert.equal(result?.block, true, `expected ${command} to be blocked`);
-    assert.match(result.reason, /results arrive automatically/);
-  }
-});
-
-test("registers the subagent tool", async () => {
-  const { tools } = setup();
+test("registers the subagent tool and slash command", async () => {
+  const { tools, commands } = setup();
   const subagent = tools.find((tool) => tool.name === "subagent");
   assert.ok(subagent);
+  assert.ok(commands.some((command) => command.name === "subagent"));
 
   const ctx: any = {
     cwd: process.cwd(),
@@ -80,6 +46,8 @@ test("registers the subagent tool", async () => {
       getSessionFile: () => undefined,
     },
   };
+  ctx.sessionManager.getLeafId = () => "leaf-1";
+  ctx.sessionManager.getBranch = () => [{ id: "leaf-1" }];
   const status = await subagent.execute(
     "smoke",
     { action: "status", sessionId: "smoke-missing-session" },
@@ -103,6 +71,8 @@ test("validates subagent parameters", async () => {
     },
   };
 
+  ctx.sessionManager.getLeafId = () => "leaf-1";
+  ctx.sessionManager.getBranch = () => [{ id: "leaf-1" }];
   await assert.rejects(
     () =>
       subagent.execute(

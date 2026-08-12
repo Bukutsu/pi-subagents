@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { rmSync } from "node:fs";
+import { mkdtempSync, rmSync, symlinkSync } from "node:fs";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
 import {
   acquireSessionLock,
   isSubagentRecord,
@@ -69,6 +71,30 @@ test("resolveSubagentCwd resolves valid directories and rejects non-existent pat
     () => resolveSubagentCwd(cwd, "non-existent-dir-12345"),
     /cwd does not exist/,
   );
+});
+
+test("resolveSubagentCwd rejects paths outside the parent and escaping symlinks", () => {
+  const parent = mkdtempSync(join(tmpdir(), "pi-subagent-parent-"));
+  const outside = mkdtempSync(join(tmpdir(), "pi-subagent-outside-"));
+  const link = join(parent, "outside-link");
+  symlinkSync(outside, link, "dir");
+  try {
+    assert.throws(
+      () => resolveSubagentCwd(parent, outside),
+      /must remain inside the parent project/,
+    );
+    assert.throws(
+      () => resolveSubagentCwd(parent, "../"),
+      /must remain inside the parent project/,
+    );
+    assert.throws(
+      () => resolveSubagentCwd(parent, "outside-link"),
+      /must remain inside the parent project/,
+    );
+  } finally {
+    rmSync(parent, { recursive: true, force: true });
+    rmSync(outside, { recursive: true, force: true });
+  }
 });
 
 test("acquireSessionLock acquires and cleans up locks", () => {
