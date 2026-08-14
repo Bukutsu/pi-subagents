@@ -426,6 +426,11 @@ export function registerSubagentModule(
             }
           }
         }
+        if (typeof runtime.refresh === "function") {
+          try {
+            await runtime.refresh({ allowNetwork: false });
+          } catch {}
+        }
         const modelSpec = opts.model?.trim();
         let resolvedModel: Model<any> | undefined;
         let resolvedThinking: ThinkingLevel | undefined;
@@ -791,6 +796,17 @@ export function registerSubagentModule(
               console.warn(`Subagent extension error: ${error.error}`),
           });
           checkSetup?.();
+          if (typeof (session as any)._modelRuntime?.refresh === "function") {
+            try {
+              await (session as any)._modelRuntime.refresh({
+                allowNetwork: false,
+              });
+            } catch {}
+          } else if (typeof runtime.refresh === "function") {
+            try {
+              await runtime.refresh({ allowNetwork: false });
+            } catch {}
+          }
           if (setupController.signal.aborted)
             throw new Error(
               "Subagent extension requested shutdown during setup",
