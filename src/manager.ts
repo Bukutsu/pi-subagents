@@ -25,6 +25,17 @@ import {
   type SubagentRecord,
 } from "./types.js";
 
+declare global {
+  var __PI_SUBAGENTS_ACTIVE_JOBS__: Map<number, SubagentJob> | undefined;
+}
+
+function getGlobalActiveJobs(): Map<number, SubagentJob> {
+  return (globalThis.__PI_SUBAGENTS_ACTIVE_JOBS__ ??= new Map<
+    number,
+    SubagentJob
+  >());
+}
+
 export interface HandoffEntry {
   v: 1;
   pid: number;
@@ -77,8 +88,16 @@ const BRAILLE = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", 
 const WIDGET_REFRESH_MS = 200;
 
 export class SubagentManager {
-  public jobs = new Map<number, SubagentJob>();
+  public jobs: Map<number, SubagentJob> = getGlobalActiveJobs();
   public nextVirtualPid = 1;
+
+  public getNextPid(): number {
+    let max = 0;
+    for (const pid of this.jobs.keys()) {
+      if (pid > max) max = pid;
+    }
+    return Math.max(this.nextVirtualPid, max + 1);
+  }
   public currentCtx: ExtensionContext | undefined;
   public generation = 0;
   public shuttingDown = true;
@@ -172,6 +191,15 @@ export class SubagentManager {
       this.lifecycle = new AbortController();
       this.deliveredCompletionIds.clear();
       this.inFlightCompletionIds.clear();
+      for (const job of this.jobs.values()) {
+        job.expectedGeneration = this.generation;
+        job.originSessionFile = ctx.sessionManager.getSessionFile() ?? "";
+        job.originSessionId = ctx.sessionManager.getSessionId();
+        job.handedOff = false;
+        if (job.activity === "finishing (session reload)") {
+          job.activity = undefined;
+        }
+      }
       this.drainHandoffs(ctx);
       this.flushPendingCompletions(ctx);
       this.syncStatus(ctx);
@@ -490,10 +518,12 @@ export class SubagentManager {
         if (
           job.completionId &&
           this.stopRequested(job.completionId) &&
-          !job.handedOff &&
           !job.controller.signal.aborted
-        )
+        ) {
+          job.stoppedManually = true;
+          job.stopping = true;
           job.controller.abort();
+        }
       }
       if (this.currentCtx) this.drainHandoffs(this.currentCtx);
       if (this.jobs.size === 0 && this.handoffWatcher) {
@@ -543,7 +573,29 @@ export class SubagentManager {
             });
           continue;
         }
-        if (this.jobs.has(entry.pid)) continue;
+        if (this.jobs.has(entry.pid) && !this.jobs.get(entry.pid)?.handedOff) {
+          continue;
+        }
+        const stopped = entry.completionId
+          ? this.stopRequested(entry.completionId)
+          : false;
+        if (stopped) {
+          if (entry.sessionId) {
+            const durable = readIndex();
+            if (durable[entry.sessionId]) {
+              durable[entry.sessionId].state = "interrupted";
+              durable[entry.sessionId].updatedAt = new Date().toISOString();
+              saveRecord(durable[entry.sessionId]);
+            }
+          }
+          rmSync(path, { force: true });
+          if (entry.completionId)
+            rmSync(join(this.handoffDir, `${entry.completionId}.stop`), {
+              force: true,
+            });
+          this.jobs.delete(entry.pid);
+          continue;
+        }
         const record =
           (entry.sessionId ? readIndex()[entry.sessionId] : undefined) ??
           ({
@@ -799,6 +851,20 @@ export class SubagentManager {
     displayMessage?: string,
     details?: unknown,
   ) {
+    if (completionId) {
+      const handoffPath = this.handoffPathFor(completionId);
+      if (handoffPath) {
+        try {
+          rmSync(handoffPath, { force: true });
+        } catch {}
+      }
+      const stopPath = join(this.handoffDir, `${completionId}.stop`);
+      if (existsSync(stopPath)) {
+        try {
+          rmSync(stopPath, { force: true });
+        } catch {}
+      }
+    }
     if (this.shuttingDown || this.generation !== expectedGeneration) return;
     if (
       completionId &&
@@ -864,10 +930,21 @@ export class SubagentManager {
     if (!job || job.controller.signal.aborted) return false;
     job.stoppedManually = true;
     job.stopping = true;
-    if (job.handedOff && job.completionId) {
+    job.controller.abort();
+    if (job.completionId) {
       this.writeStopMarker(job.completionId);
-    } else {
-      job.controller.abort();
+    }
+    if (job.handedOff) {
+      try {
+        job.record = {
+          ...job.record,
+          state: "interrupted",
+          updatedAt: new Date().toISOString(),
+          durationSec: Math.round((Date.now() - job.startedAt) / 1000),
+        };
+        saveRecord(job.record);
+      } catch {}
+      this.jobs.delete(pid);
     }
     return true;
   }

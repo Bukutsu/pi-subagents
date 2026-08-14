@@ -384,36 +384,46 @@ export function registerSubagentModule(
       };
       const setupChildSession = async (opts: ChildSetupOptions) => {
         const { existing = false, checkSetup, shutdownHandler } = opts;
-        const runtimePromise = (modelRuntime ??= ModelRuntime.create());
-        void runtimePromise.catch(() => {
-          if (modelRuntime === runtimePromise) modelRuntime = undefined;
-        });
-        const runtime = await awaitWithoutCancelling(
-          runtimePromise,
-          opts.setupSignal,
-        );
+        const parentRuntime = (ctx.modelRegistry as any)?.runtime as
+          | ModelRuntime
+          | undefined;
+        let runtime: ModelRuntime;
+        if (parentRuntime) {
+          runtime = parentRuntime;
+        } else {
+          const runtimePromise = (modelRuntime ??= ModelRuntime.create());
+          void runtimePromise.catch(() => {
+            if (modelRuntime === runtimePromise) modelRuntime = undefined;
+          });
+          runtime = await awaitWithoutCancelling(
+            runtimePromise,
+            opts.setupSignal,
+          );
+        }
         checkSetup?.();
-        for (const providerId of ctx.modelRegistry.getRegisteredProviderIds()) {
-          try {
-            const native =
-              ctx.modelRegistry.getRegisteredNativeProvider(providerId);
-            const config =
-              ctx.modelRegistry.getRegisteredProviderConfig(providerId);
-            if (native) {
-              runtime.registerNativeProvider(native);
-            } else if (config) {
-              runtime.registerProvider(providerId, config);
-            } else {
-              const provider = ctx.modelRegistry.getProvider(providerId);
-              if (provider) {
-                runtime.registerNativeProvider(provider);
+        if (typeof ctx.modelRegistry.getRegisteredProviderIds === "function") {
+          for (const providerId of ctx.modelRegistry.getRegisteredProviderIds()) {
+            try {
+              const native =
+                ctx.modelRegistry.getRegisteredNativeProvider?.(providerId);
+              const config =
+                ctx.modelRegistry.getRegisteredProviderConfig?.(providerId);
+              if (native && typeof runtime.registerNativeProvider === "function") {
+                runtime.registerNativeProvider(native);
+              } else if (config && typeof runtime.registerProvider === "function") {
+                runtime.registerProvider(providerId, config);
+              } else if (typeof runtime.registerNativeProvider === "function") {
+                const provider = ctx.modelRegistry.getProvider?.(providerId);
+                if (provider) {
+                  runtime.registerNativeProvider(provider);
+                }
               }
+            } catch (providerError) {
+              console.warn(
+                `Could not forward provider ${providerId} to subagent runtime:`,
+                providerError,
+              );
             }
-          } catch (providerError) {
-            console.warn(
-              `Could not forward provider ${providerId} to subagent runtime:`,
-              providerError,
-            );
           }
         }
         const modelSpec = opts.model?.trim();
@@ -556,32 +566,66 @@ export function registerSubagentModule(
             ? (scopedEntry?.thinkingLevel ?? ctx.thinkingLevel)
             : undefined);
         if (selectedModel) {
-          const parentAuth =
-            await ctx.modelRegistry.getApiKeyAndHeaders(selectedModel);
-          checkSetup?.();
-          if (parentAuth.ok && parentAuth.apiKey) {
-            await runtime.setRuntimeApiKey(
-              selectedModel.provider,
-              parentAuth.apiKey,
-              {
-                signal: opts.setupSignal,
-                ...(parentAuth.env ? { env: parentAuth.env } : {}),
-              },
-            );
+          if (typeof ctx.modelRegistry.getApiKeyAndHeaders === "function") {
+            const parentAuth =
+              await ctx.modelRegistry.getApiKeyAndHeaders(selectedModel);
             checkSetup?.();
+            if (
+              parentAuth.ok &&
+              parentAuth.apiKey &&
+              typeof runtime.setRuntimeApiKey === "function"
+            ) {
+              await runtime.setRuntimeApiKey(
+                selectedModel.provider,
+                parentAuth.apiKey,
+                {
+                  signal: opts.setupSignal,
+                  ...(parentAuth.env ? { env: parentAuth.env } : {}),
+                },
+              );
+              checkSetup?.();
+            }
           }
-          const childAvailable = await runtime.getAvailable(
-            selectedModel.provider,
-            { signal: opts.setupSignal },
-          );
-          checkSetup?.();
           if (
-            !childAvailable.some(
+            typeof ctx.modelRegistry.getProvider === "function" &&
+            typeof runtime.registerNativeProvider === "function"
+          ) {
+            const provider = ctx.modelRegistry.getProvider(
+              selectedModel.provider,
+            );
+            if (
+              provider &&
+              typeof runtime.getProvider === "function" &&
+              !runtime.getProvider(selectedModel.provider)
+            ) {
+              try {
+                runtime.registerNativeProvider(provider);
+              } catch {}
+            }
+          }
+          let childAvailable: readonly Model<any>[] = [];
+          if (typeof runtime.getAvailable === "function") {
+            try {
+              childAvailable = await runtime.getAvailable(
+                selectedModel.provider,
+                { signal: opts.setupSignal },
+              );
+              checkSetup?.();
+            } catch {}
+          }
+          const isAvailableInRuntime = childAvailable.some(
+            (candidate) =>
+              candidate.provider === selectedModel.provider &&
+              candidate.id === selectedModel.id,
+          );
+          const isAvailableInRegistry = ctx.modelRegistry
+            .getAvailable()
+            .some(
               (candidate) =>
                 candidate.provider === selectedModel.provider &&
                 candidate.id === selectedModel.id,
-            )
-          )
+            );
+          if (!isAvailableInRuntime && !isAvailableInRegistry)
             throw new Error(
               `Model ${selectedModel.provider}/${selectedModel.id} is not available to the child runtime`,
             );
@@ -1322,7 +1366,8 @@ export function registerSubagentModule(
         throw setupError;
       }
 
-      const pid = manager.nextVirtualPid++;
+      const pid = manager.getNextPid();
+      manager.nextVirtualPid = pid + 1;
       const completionId = randomUUID();
       let timedOut = false;
       let cancelled = false;

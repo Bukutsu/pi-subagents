@@ -200,3 +200,48 @@ test("validates subagent parameters", async () => {
     /Running subagent not found/,
   );
 });
+
+test("supports extension models in models action and model resolution", async () => {
+  const { tools } = setup();
+  const subagent = tools.find((tool) => tool.name === "subagent");
+  const extensionModels = [
+    { provider: "antigravity", id: "gemini-3.7-flash", name: "Gemini 3.7 Flash" },
+    { provider: "flm", id: "gemma3:1b", name: "Gemma3 1B" },
+  ];
+  const mockRuntime: any = {
+    getModels: () => extensionModels,
+    getAvailableSnapshot: () => extensionModels,
+    getAvailable: async () => extensionModels,
+    getProvider: () => ({ name: "Extension Provider" }),
+  };
+  const ctx: any = {
+    cwd: process.cwd(),
+    scopedModels: [],
+    modelRegistry: {
+      runtime: mockRuntime,
+      getAvailable: () => extensionModels,
+      getAll: () => extensionModels,
+      getRegisteredProviderIds: () => ["antigravity", "flm"],
+      getRegisteredNativeProvider: () => undefined,
+      getRegisteredProviderConfig: () => undefined,
+      getProvider: () => undefined,
+      getApiKeyAndHeaders: async () => ({ ok: true }),
+    },
+    sessionManager: {
+      getLeafId: () => "leaf-1",
+      getBranch: () => [{ id: "leaf-1" }],
+    },
+  };
+
+  const modelsResult = await subagent.execute(
+    "models-ext",
+    { action: "models" },
+    undefined,
+    undefined,
+    ctx,
+  );
+  const parsed = JSON.parse(modelsResult.content[0].text);
+  assert.equal(parsed.total, 2);
+  assert.equal(parsed.models[0].model, "antigravity/gemini-3.7-flash");
+  assert.equal(parsed.models[1].model, "flm/gemma3:1b");
+});
