@@ -232,7 +232,8 @@ export function registerSubagentModule(
       "Run, inspect, steer, or stop durable background Pi sessions. Query models for the live session scope.",
     promptSnippet: "Delegate durable background work to a subagent.",
     promptGuidelines: [
-      "Use subagent for multi-step or isolated work; continue immediately after spawning and never poll.",
+      "Use subagent for multi-step or isolated work; finish your turn immediately after spawning (or do un-blocked independent work) and NEVER poll action:status or sleep.",
+      "Set completion: 'continue' when you need the subagent result to proceed — the framework automatically wakes the parent session when the subagent finishes.",
       "Query subagent action:models before choosing an explicit model when the live session scope may have changed.",
       "Use subagent context:fork only when parent history is needed; narrow tools when practical; use worktree:true for concurrent edits.",
     ],
@@ -275,7 +276,7 @@ export function registerSubagentModule(
       completion: Type.Optional(
         StringEnum(["queue", "continue"] as const, {
           description:
-            "queue stores the result without waking an idle parent (default); continue wakes it",
+            "queue stores the result without waking an idle parent; use 'continue' to automatically wake the parent session when finished",
         }),
       ),
       modelOffset: Type.Optional(
