@@ -88,6 +88,26 @@ function awaitWithoutCancelling<T>(
   });
 }
 
+/**
+ * Whether the parent-resolved api key should be pushed onto the child runtime
+ * as a runtime override. A shared runtime already exposes the parent's stored
+ * credentials and overrides; forcing the resolved key there would corrupt
+ * OAuth resolution (the OAuth-derived key is not a valid api_key credential).
+ */
+export function shouldForwardApiKey(options: {
+  sharingParentRuntime: boolean;
+  parentAuthOk: boolean;
+  hasApiKey: boolean;
+  oauthInUse: boolean;
+}): boolean {
+  return (
+    !options.sharingParentRuntime &&
+    options.parentAuthOk &&
+    options.hasApiKey &&
+    !options.oauthInUse
+  );
+}
+
 export function registerSubagentModule(
   pi: ExtensionAPI,
   manager: SubagentManager,
@@ -385,8 +405,7 @@ export function registerSubagentModule(
       const setupChildSession = async (opts: ChildSetupOptions) => {
         const { existing = false, checkSetup, shutdownHandler } = opts;
         const parentRuntime = (ctx.modelRegistry as any)?.runtime as
-          | ModelRuntime
-          | undefined;
+          ModelRuntime | undefined;
         let runtime: ModelRuntime;
         if (parentRuntime) {
           runtime = parentRuntime;
@@ -408,9 +427,15 @@ export function registerSubagentModule(
                 ctx.modelRegistry.getRegisteredNativeProvider?.(providerId);
               const config =
                 ctx.modelRegistry.getRegisteredProviderConfig?.(providerId);
-              if (native && typeof runtime.registerNativeProvider === "function") {
+              if (
+                native &&
+                typeof runtime.registerNativeProvider === "function"
+              ) {
                 runtime.registerNativeProvider(native);
-              } else if (config && typeof runtime.registerProvider === "function") {
+              } else if (
+                config &&
+                typeof runtime.registerProvider === "function"
+              ) {
                 runtime.registerProvider(providerId, config);
               } else if (typeof runtime.registerNativeProvider === "function") {
                 const provider = ctx.modelRegistry.getProvider?.(providerId);
@@ -571,25 +596,41 @@ export function registerSubagentModule(
             ? (scopedEntry?.thinkingLevel ?? ctx.thinkingLevel)
             : undefined);
         if (selectedModel) {
-          if (typeof ctx.modelRegistry.getApiKeyAndHeaders === "function") {
-            const parentAuth =
-              await ctx.modelRegistry.getApiKeyAndHeaders(selectedModel);
+          const sharingParentRuntime = runtime === parentRuntime;
+          // A shared runtime already exposes the parent's credentials (stored
+          // OAuth refresh tokens, api-key overrides, env) — forcing the
+          // resolved api key as a runtime override there would corrupt OAuth
+          // resolution. Only a fresh fallback runtime needs the override, and
+          // only for providers not authenticated via OAuth.
+          const parentAuth =
+            !sharingParentRuntime &&
+            typeof ctx.modelRegistry.getApiKeyAndHeaders === "function"
+              ? await ctx.modelRegistry.getApiKeyAndHeaders(selectedModel)
+              : undefined;
+          checkSetup?.();
+          const oauthInUse =
+            typeof runtime.isUsingOAuth === "function" &&
+            runtime.isUsingOAuth(selectedModel.provider);
+          if (
+            parentAuth?.ok === true &&
+            parentAuth.apiKey &&
+            shouldForwardApiKey({
+              sharingParentRuntime,
+              parentAuthOk: true,
+              hasApiKey: true,
+              oauthInUse,
+            }) &&
+            typeof runtime.setRuntimeApiKey === "function"
+          ) {
+            await runtime.setRuntimeApiKey(
+              selectedModel.provider,
+              parentAuth.apiKey,
+              {
+                signal: opts.setupSignal,
+                ...(parentAuth.env ? { env: parentAuth.env } : {}),
+              },
+            );
             checkSetup?.();
-            if (
-              parentAuth.ok &&
-              parentAuth.apiKey &&
-              typeof runtime.setRuntimeApiKey === "function"
-            ) {
-              await runtime.setRuntimeApiKey(
-                selectedModel.provider,
-                parentAuth.apiKey,
-                {
-                  signal: opts.setupSignal,
-                  ...(parentAuth.env ? { env: parentAuth.env } : {}),
-                },
-              );
-              checkSetup?.();
-            }
           }
           if (
             typeof ctx.modelRegistry.getProvider === "function" &&

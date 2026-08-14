@@ -1,6 +1,9 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { registerSubagentModule } from "../src/subagent.js";
+import {
+  registerSubagentModule,
+  shouldForwardApiKey,
+} from "../src/subagent.js";
 
 function setup() {
   const tools: any[] = [];
@@ -205,7 +208,11 @@ test("supports extension models in models action and model resolution", async ()
   const { tools } = setup();
   const subagent = tools.find((tool) => tool.name === "subagent");
   const extensionModels = [
-    { provider: "antigravity", id: "gemini-3.7-flash", name: "Gemini 3.7 Flash" },
+    {
+      provider: "antigravity",
+      id: "gemini-3.7-flash",
+      name: "Gemini 3.7 Flash",
+    },
     { provider: "flm", id: "gemma3:1b", name: "Gemma3 1B" },
   ];
   const mockRuntime: any = {
@@ -249,7 +256,11 @@ test("supports extension models in models action and model resolution", async ()
 test("refreshes model runtime snapshot after binding extensions", async () => {
   let refreshCalled = false;
   const extensionModels = [
-    { provider: "antigravity", id: "gemini-3.7-flash", name: "Gemini 3.7 Flash" },
+    {
+      provider: "antigravity",
+      id: "gemini-3.7-flash",
+      name: "Gemini 3.7 Flash",
+    },
   ];
   const mockRuntime: any = {
     getModels: () => extensionModels,
@@ -282,4 +293,47 @@ test("refreshes model runtime snapshot after binding extensions", async () => {
   const { tools } = setup();
   const subagent = tools.find((tool) => tool.name === "subagent");
   assert.ok(subagent);
+});
+
+test("does not push api-key overrides onto a shared parent runtime or OAuth providers", () => {
+  assert.equal(
+    shouldForwardApiKey({
+      sharingParentRuntime: true,
+      parentAuthOk: true,
+      hasApiKey: true,
+      oauthInUse: false,
+    }),
+    false,
+    "shared runtime must not receive an override: credentials are already exposed",
+  );
+  assert.equal(
+    shouldForwardApiKey({
+      sharingParentRuntime: false,
+      parentAuthOk: true,
+      hasApiKey: true,
+      oauthInUse: true,
+    }),
+    false,
+    "OAuth providers must not receive the resolved key as an api_key override",
+  );
+  assert.equal(
+    shouldForwardApiKey({
+      sharingParentRuntime: false,
+      parentAuthOk: true,
+      hasApiKey: false,
+      oauthInUse: false,
+    }),
+    false,
+    "no override without a resolved key",
+  );
+  assert.equal(
+    shouldForwardApiKey({
+      sharingParentRuntime: false,
+      parentAuthOk: true,
+      hasApiKey: true,
+      oauthInUse: false,
+    }),
+    true,
+    "fresh runtime with an api-key provider forwards the key",
+  );
 });
