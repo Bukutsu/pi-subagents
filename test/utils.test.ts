@@ -19,7 +19,7 @@ import {
   sanitizeTerminalOutput,
   usageSince,
 } from "../src/utils.js";
-import type { SubagentRecord } from "../src/types.js";
+import { retainLog, type SubagentRecord } from "../src/types.js";
 
 const record: SubagentRecord = {
   sessionId: "session-1",
@@ -259,4 +259,12 @@ test("sanitizeForkMessages keeps the newest assistant reply when a unit exceeds 
   const text = sanitized.at(-1)!.content;
   assert.ok(typeof text === "string" && text.includes("newest answer"));
   assert.ok(Buffer.byteLength(JSON.stringify(sanitized)) <= 64 * 1024);
+});
+
+test("retainLog uses timestamp-prefixed filenames for chronological sorting", () => {
+  const logPath = retainLog("test log content");
+  if (logPath) {
+    const filename = logPath.split("/").pop() ?? "";
+    assert.match(filename, /^\d+-[0-9a-f-]+\.log$/);
+  }
 });

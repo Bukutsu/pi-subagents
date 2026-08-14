@@ -118,7 +118,7 @@ export function retainLog(content: string | Uint8Array) {
   // survive process exit and pi updates. Oldest logs are pruned.
   try {
     mkdirSync(LOG_DIR, { recursive: true, mode: 0o700 });
-    const path = join(LOG_DIR, `${randomUUID()}.log`);
+    const path = join(LOG_DIR, `${Date.now()}-${randomUUID()}.log`);
     writeFileSync(path, content, { mode: 0o600 });
     const logs = readdirSync(LOG_DIR)
       .filter((name) => name.endsWith(".log"))
