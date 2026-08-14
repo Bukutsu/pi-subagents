@@ -4,6 +4,8 @@
 
 - Add `prepareArguments` compatibility shim to automatically normalize array-formatted `tools` parameters (e.g. `["read", "bash"]`).
 - Fix `retainLog` file pruning to use timestamp-prefixed filenames for accurate chronological log pruning.
+- Ensure `removeLock` in subagent lifecycle is idempotent to prevent deleting newly acquired locks during forced stop cleanup.
+- Fix model fallback on subagent resume in unrestricted mode when saved model is unavailable.
 - Update devDependencies and peer compatibility to `@earendil-works/pi-coding-agent` v0.84.2.
 - Render subagent output with pi's native markdown theme (syntax-highlighted code blocks and theme-customizable markdown colors).
 - Keep children running across session replacement (`/reload`, `/new`,

@@ -599,9 +599,21 @@ export function registerSubagentModule(
                   opts.savedModel,
               )
             : undefined;
+        if (
+          existing &&
+          !resolvedModel &&
+          opts.savedModel &&
+          !savedEntry &&
+          !scopeRestricted &&
+          ctx.model
+        ) {
+          modelRequestWarning = `Saved model ${opts.savedModel} is unavailable; resumed with ${ctx.model.provider}/${ctx.model.id}`;
+        }
         const selectedModel =
           resolvedModel ??
-          (!existing ? (scopedEntry?.model ?? ctx.model) : savedEntry?.model);
+          (!existing
+            ? (scopedEntry?.model ?? ctx.model)
+            : (savedEntry?.model ?? ctx.model));
         const effectiveThinking =
           requestedThinking ??
           (!existing
@@ -1287,8 +1299,10 @@ export function registerSubagentModule(
         checkSetup();
         const removeLock = () => {
           if (!sessionLock) return;
+          const target = sessionLock;
+          sessionLock = "";
           try {
-            rmSync(sessionLock, { recursive: true, force: true });
+            rmSync(target, { recursive: true, force: true });
           } catch {}
         };
         forceCleanupChild = () => {
