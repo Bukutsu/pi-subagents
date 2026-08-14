@@ -236,6 +236,18 @@ export function registerSubagentModule(
       "Query subagent action:models before choosing an explicit model when the live session scope may have changed.",
       "Use subagent context:fork only when parent history is needed; narrow tools when practical; use worktree:true for concurrent edits.",
     ],
+    prepareArguments(args: unknown) {
+      if (args && typeof args === "object" && !Array.isArray(args)) {
+        const raw = args as Record<string, unknown>;
+        if (Array.isArray(raw.tools)) {
+          return {
+            ...raw,
+            tools: raw.tools.join(","),
+          };
+        }
+      }
+      return args as any;
+    },
     parameters: Type.Object({
       action: Type.Optional(
         StringEnum(["spawn", "models", "status", "steer", "stop"] as const, {

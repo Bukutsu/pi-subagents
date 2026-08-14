@@ -55,7 +55,9 @@ test("reload preserves live in-process subagent job across extension reload", as
       controller: childController,
       completionId: "completion-reload-s1",
       forceCleanup: () => {},
-      session: { getSessionStats: () => ({ assistantMessages: 0, toolCalls: 0 }) },
+      session: {
+        getSessionStats: () => ({ assistantMessages: 0, toolCalls: 0 }),
+      },
       activity: "thinking",
       baseline: { assistantMessages: 0, toolCalls: 0 },
       record: { sessionId: "session-abc", cwd: process.cwd(), model: "test" },
@@ -79,13 +81,21 @@ test("reload preserves live in-process subagent job across extension reload", as
     newManager.init();
     await newHandlers.get("session_start")!({ reason: "reload" }, createCtx());
     const restored = newManager.jobs.get(100);
-    assert.equal(restored?.handedOff, false, "in-process reload preserves live job");
+    assert.equal(
+      restored?.handedOff,
+      false,
+      "in-process reload preserves live job",
+    );
     assert.notEqual(restored?.activity, "finishing (session reload)");
 
     // Stopping the job in the new manager directly aborts the live controller.
     const stopped = newManager.killJob(100);
     assert.equal(stopped, true);
-    assert.equal(childController.signal.aborted, true, "killJob directly aborts controller");
+    assert.equal(
+      childController.signal.aborted,
+      true,
+      "killJob directly aborts controller",
+    );
 
     // Clean up
     newManager.jobs.delete(100);

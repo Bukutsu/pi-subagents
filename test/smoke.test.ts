@@ -295,6 +295,23 @@ test("refreshes model runtime snapshot after binding extensions", async () => {
   assert.ok(subagent);
 });
 
+test("prepares raw tool call arguments with array tools", () => {
+  const { tools } = setup();
+  const subagent = tools.find((tool) => tool.name === "subagent");
+  assert.ok(subagent.prepareArguments);
+
+  const prepared = subagent.prepareArguments({
+    action: "spawn",
+    tools: ["read", "bash"],
+    prompt: "do work",
+  });
+  assert.deepEqual(prepared, {
+    action: "spawn",
+    tools: "read,bash",
+    prompt: "do work",
+  });
+});
+
 test("does not push api-key overrides onto a shared parent runtime or OAuth providers", () => {
   assert.equal(
     shouldForwardApiKey({
