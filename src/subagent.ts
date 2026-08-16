@@ -302,7 +302,8 @@ export function registerSubagentModule(
         availableIds.has(`${entry.model.provider}/${entry.model.id}`),
       );
       const requestedId = sessionId?.trim();
-      const durable = readIndex();
+      let durableCache: Record<string, SubagentRecord> | undefined;
+      const getDurable = () => (durableCache ??= readIndex());
       const findBySessionPrefix = <T extends { sessionId?: string }>(
         items: T[],
         id: string,
@@ -324,6 +325,7 @@ export function registerSubagentModule(
           "running sessions",
         );
       const findDurableRecord = (id: string) => {
+        const durable = getDurable();
         if (Object.hasOwn(durable, id)) return durable[id];
         return findBySessionPrefix(Object.values(durable), id, "sessions");
       };
@@ -936,7 +938,7 @@ export function registerSubagentModule(
                 0,
                 MAX_LIST_ITEMS,
               ),
-              ...Object.values(durable)
+              ...Object.values(getDurable())
                 .filter((record) => !active.has(record.sessionId))
                 .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))
                 .slice(0, 5),

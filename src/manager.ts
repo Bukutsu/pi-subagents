@@ -424,6 +424,7 @@ export class SubagentManager {
         () => this.syncStatus(),
         WIDGET_REFRESH_MS,
       );
+      this.widgetTimer.unref?.();
     }
   }
 
