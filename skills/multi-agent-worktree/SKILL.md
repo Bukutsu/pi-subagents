@@ -15,9 +15,10 @@ Guide for safe, predictable parallel coding and multi-agent editing using `pi-su
 
 ## Core Rules
 
-1. **Use Native Harness Isolation**: Always call `subagent({ prompt, worktree: true })`. Never manually run `git worktree add` inside the project tree.
-2. **Clean Main Workspace First**: `pi-subagents` checks that `git status --porcelain` is clean before creating a worktree. Commit or stash any uncommitted changes in the parent workspace before spawning worktrees.
-3. **Subagent Branch Lifecycle**: Each worktree runs on a private branch `pi-subagents/<timestamp>-<id>`. When the child finishes, inspect the diff, integrate the result, and delete the temporary branch.
+1. **Only For Concurrent Writers**: Use `worktree: true` **only** when the subagent will write/edit code, apply patches, or run commands that modify the filesystem. For read-only tasks (searching code, answering questions, reading logs, audits, reviews), omit `worktree` (default `false`) to avoid worktree creation overhead, branch lifecycle cleanup, and dirty-tree constraints.
+2. **Use Native Harness Isolation**: Always call `subagent({ prompt, worktree: true })`. Never manually run `git worktree add` inside the project tree.
+3. **Clean Main Workspace First**: `pi-subagents` checks that `git status --porcelain` is clean before creating a worktree. Commit or stash any uncommitted changes in the parent workspace before spawning worktrees.
+4. **Subagent Branch Lifecycle**: Each worktree runs on a private branch `pi-subagents/<timestamp>-<id>`. When the child finishes, inspect the diff, integrate the result, and delete the temporary branch.
 
 ---
 
