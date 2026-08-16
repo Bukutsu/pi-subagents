@@ -701,12 +701,13 @@ export class SubagentManager {
   ) {
     if (!this.canDeliverToOrigin(originLeafId, ctx)) return;
     const idle = ctx.isIdle();
-    if (!triggerTurn && !idle) throw new Error("Parent turn is still active");
+    if (!triggerTurn && !idle && completion !== "queue")
+      throw new Error("Parent turn is still active");
     const options =
       completion === "queue"
         ? idle
           ? { triggerTurn: false as const }
-          : { deliverAs: "followUp" as const }
+          : { deliverAs: "followUp" as const, triggerTurn: false as const }
         : { deliverAs: "steer" as const, triggerTurn };
     this.pi.sendMessage(
       {
@@ -970,6 +971,10 @@ export class SubagentManager {
     if (job.completionId) {
       this.writeStopMarker(job.completionId);
     }
+    this.pi.events?.emit("subagent:stop", {
+      pid,
+      sessionId: job.sessionId,
+    });
     if (job.handedOff) {
       try {
         job.record = {

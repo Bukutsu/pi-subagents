@@ -185,3 +185,53 @@ test("killAllJobs aborts active subagents and pending setup", () => {
 
   release();
 });
+
+test("emits subagent:stop event on pi.events when killing a job", () => {
+  const events: Array<{ name: string; data: any }> = [];
+  const pi: any = {
+    events: {
+      emit: (name: string, data: any) => events.push({ name, data }),
+    },
+  };
+  const manager = new SubagentManager(pi);
+  const controller = new AbortController();
+  manager.jobs.set(1, {
+    sessionId: "test-session-123",
+    controller,
+  } as any);
+
+  assert.equal(manager.killJob(1), true);
+  assert.equal(events.length, 1);
+  assert.equal(events[0].name, "subagent:stop");
+  assert.equal(events[0].data.pid, 1);
+  assert.equal(events[0].data.sessionId, "test-session-123");
+});
+
+test("passes triggerTurn: false when delivering follow-up queue completions during active turns", () => {
+  const calls: Array<{ message: unknown; options: unknown }> = [];
+  const manager = new SubagentManager({
+    sendMessage: (message: unknown, options: unknown) =>
+      calls.push({ message, options }),
+  } as any);
+  const ctx: any = {
+    isIdle: () => false,
+    sessionManager: {
+      getLeafId: () => "leaf-1",
+      getBranch: () => [{ id: "leaf-1" }],
+    },
+  };
+
+  (manager as any).sendCompletionMessage(
+    "queued result",
+    "queue",
+    "leaf-1",
+    false,
+    ctx,
+  );
+
+  assert.equal(calls.length, 1);
+  assert.deepEqual(calls[0].options, {
+    deliverAs: "followUp",
+    triggerTurn: false,
+  });
+});

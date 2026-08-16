@@ -692,6 +692,14 @@ export function registerSubagentModule(
             modelRuntime: runtime,
             sessionManager: opts.sessionManager,
             settingsManager,
+            scopedModels: scopedModels.length > 0 ? scopedModels : undefined,
+            sessionStartEvent: {
+              type: "session_start",
+              reason: existing ? "resume" : "startup",
+              previousSessionFile: existing
+                ? opts.sessionManager.getSessionFile()
+                : undefined,
+            },
             ...(resourceLoader ? { resourceLoader } : {}),
             ...(explicitTools ? { tools: explicitTools } : {}),
             ...(selectedModel ? { model: selectedModel } : {}),
@@ -1265,13 +1273,24 @@ export function registerSubagentModule(
               SUBAGENT_LOCKS,
             );
           }
+          const parentSessionFile = ctx.sessionManager.getSessionFile();
           sessionManager = existing
             ? SessionManager.open(
                 validatedSessionFile ?? existing.sessionFile,
                 SUBAGENT_SESSION_DIR,
                 childCwd,
               )
-            : SessionManager.create(childCwd, SUBAGENT_SESSION_DIR);
+            : context === "fork" &&
+                parentSessionFile &&
+                existsSync(parentSessionFile)
+              ? SessionManager.forkFrom(
+                  parentSessionFile,
+                  childCwd,
+                  SUBAGENT_SESSION_DIR,
+                )
+              : SessionManager.create(childCwd, SUBAGENT_SESSION_DIR, {
+                  parentSession: parentSessionFile,
+                });
           const actualSessionId = sessionManager.getSessionId();
           if (existing && actualSessionId !== existing.sessionId) {
             throw new Error(
@@ -1449,6 +1468,14 @@ export function registerSubagentModule(
         };
         manager.jobs.set(pid, job);
         saveRecord(record);
+        manager.pi.events?.emit("subagent:spawn", {
+          pid: job.pid,
+          sessionId: session.sessionId,
+          label: job.command,
+          model: job.record.model,
+          cwd: job.record.cwd,
+          worktree: Boolean(job.record.branch),
+        });
         checkSetup();
         finishSetup();
       } catch (error) {
@@ -1494,6 +1521,13 @@ export function registerSubagentModule(
         if (job.activity === activity) return;
         job.activity = activity;
         manager.syncStatus(ctx);
+        manager.pi.events?.emit("subagent:progress", {
+          pid: job.pid,
+          sessionId: job.sessionId,
+          activity: job.activity,
+          turns: job.record.turns,
+          toolCount: job.record.toolCount,
+        });
       };
       const unsubscribe = session.subscribe((event) => {
         if (
@@ -1503,6 +1537,17 @@ export function registerSubagentModule(
           lastAssistantMessage = event.message;
         }
         if (event.type === "turn_start") setActivity("thinking");
+        else if (event.type === "compaction_start")
+          setActivity("compacting context");
+        else if (event.type === "compaction_end") setActivity("thinking");
+        else if (event.type === "auto_retry_start") {
+          const attempt = (event as any).attempt;
+          setActivity(
+            typeof attempt === "number"
+              ? `retrying (${attempt})...`
+              : "retrying...",
+          );
+        } else if (event.type === "auto_retry_end") setActivity("thinking");
         else if (
           event.type === "message_update" &&
           event.assistantMessageEvent?.type === "text_delta" &&
@@ -1667,6 +1712,14 @@ export function registerSubagentModule(
             ? `\n\n${truncated.content}`
             : "";
           const reasonText = reason ? `\n\nReason: ${reason}` : "";
+          manager.pi.events?.emit("subagent:complete", {
+            pid: job.pid,
+            sessionId: session.sessionId,
+            state,
+            durationSec: completedRecord.durationSec ?? 0,
+            usage: completedRecord.usage,
+            logPath: retainedLogFile,
+          });
           const compact = serializeModelJson({
             v: 1,
             type: "subagent",
