@@ -239,6 +239,23 @@ export function readIndex(
   return records;
 }
 
+export function atomicWriteFileSync(
+  target: string,
+  content: string | Buffer,
+  mode = 0o600,
+) {
+  const temporary = `${target}.${process.pid}.${randomUUID()}.tmp`;
+  try {
+    writeFileSync(temporary, content, { mode, flush: true });
+    renameSync(temporary, target);
+  } catch (error) {
+    try {
+      rmSync(temporary, { force: true });
+    } catch {}
+    throw error;
+  }
+}
+
 export function ensurePrivateDir(dir: string) {
   mkdirSync(dir, { recursive: true, mode: 0o700 });
   chmodSync(dir, 0o700); // tighten pre-existing dirs
@@ -249,19 +266,7 @@ export function saveRecord(record: SubagentRecord) {
     throw new Error(`Invalid subagent session ID: ${record.sessionId}`);
   ensurePrivateDir(SUBAGENT_INDEX);
   const target = join(SUBAGENT_INDEX, `${record.sessionId}.json`);
-  const temporary = `${target}.${process.pid}.${randomUUID()}.tmp`;
-  try {
-    writeFileSync(temporary, `${JSON.stringify(record, null, 2)}\n`, {
-      mode: 0o600,
-      flush: true,
-    });
-    renameSync(temporary, target);
-  } catch (error) {
-    try {
-      rmSync(temporary, { force: true });
-    } catch {}
-    throw error;
-  }
+  atomicWriteFileSync(target, `${JSON.stringify(record, null, 2)}\n`, 0o600);
 }
 
 export function usageSince(current: SessionStats, baseline: SessionStats) {

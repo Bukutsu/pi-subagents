@@ -109,6 +109,15 @@ export async function createWorktree(
       `worktree:true requires a Git worktree: ${rootResult.stderr.trim() || ctx.cwd}`,
     );
   const root = realpathSync(rootResult.stdout.trim());
+  const statusResult = await pi.exec("git", ["status", "--porcelain"], {
+    cwd: root,
+    signal,
+  });
+  if (statusResult.code === 0 && statusResult.stdout.trim().length > 0) {
+    throw new Error(
+      "Cannot create worktree: parent repository has uncommitted changes. Commit or stash them before using worktree:true.",
+    );
+  }
   const id = randomUUID().slice(0, 8);
   const branch = `pi-subagents/${Date.now()}-${id}`;
   ensurePrivateDir(SUBAGENT_WORKTREES);

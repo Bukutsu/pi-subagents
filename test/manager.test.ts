@@ -54,6 +54,44 @@ test("batches queued completions after the parent settles", () => {
   assert.equal(JSON.parse(messages[0].content).results.length, 2);
 });
 
+test("coalesces multiple continue completions on the same origin branch", () => {
+  const messages: any[] = [];
+  const manager = new SubagentManager({
+    sendMessage: (message: unknown) => messages.push(message),
+  } as any);
+  manager.shuttingDown = false;
+  manager.generation = 1;
+  const ctx: any = {
+    isIdle: () => true,
+    sessionManager: {
+      getLeafId: () => "leaf-1",
+      getBranch: () => [{ id: "leaf-1" }],
+    },
+  };
+  manager.currentCtx = ctx;
+
+  (manager as any).pendingCompletions.push({
+    message: '{"sessionId":"child-1","output":"done 1"}',
+    completion: "continue",
+    expectedGeneration: 1,
+    originLeafId: "leaf-1",
+    triggerTurn: true,
+  });
+  (manager as any).pendingCompletions.push({
+    message: '{"sessionId":"child-2","output":"done 2"}',
+    completion: "continue",
+    expectedGeneration: 1,
+    originLeafId: "leaf-1",
+    triggerTurn: true,
+  });
+
+  (manager as any).flushPendingCompletions(ctx);
+  assert.equal(messages.length, 1);
+  const parsed = JSON.parse(messages[0].content);
+  assert.equal(parsed.event, "batch");
+  assert.equal(parsed.results.length, 2);
+});
+
 test("keeps queued batches separated by origin and byte budget", () => {
   const messages: any[] = [];
   const manager = new SubagentManager({

@@ -73,6 +73,7 @@ const HANDED_OFF_SESSION: any = {
   }),
 };
 import {
+  atomicWriteFileSync,
   createMarkdownComponent,
   displayText,
   ensurePrivateDir,
@@ -83,6 +84,20 @@ import {
   saveRecord,
   usageSince,
 } from "./utils.js";
+
+const GLOBAL_EXIT_HANDLER_KEY = Symbol.for("pi-subagents.exit-handler");
+function ensureGlobalExitHandler() {
+  if ((globalThis as any)[GLOBAL_EXIT_HANDLER_KEY]) return;
+  (globalThis as any)[GLOBAL_EXIT_HANDLER_KEY] = true;
+  process.on("exit", () => {
+    const jobs = getGlobalActiveJobs();
+    for (const job of jobs.values()) {
+      try {
+        job.controller.abort();
+      } catch {}
+    }
+  });
+}
 
 const BRAILLE = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 const WIDGET_REFRESH_MS = 200;
@@ -289,9 +304,7 @@ export class SubagentManager {
         // the next runtime of the origin session through the handoff dir.
         this.handoffActiveJobs(ctx);
         this.startHandoffWatcher();
-        process.on("exit", () => {
-          for (const job of this.jobs.values()) job.controller.abort();
-        });
+        ensureGlobalExitHandler();
       }
       this.currentCtx = undefined;
     });
@@ -449,20 +462,14 @@ export class SubagentManager {
   ) {
     try {
       const entry = JSON.parse(readFileSync(path, "utf8")) as HandoffEntry;
-      writeFileSync(path, JSON.stringify({ ...entry, result }, null, 2), {
-        mode: 0o600,
-      });
+      atomicWriteFileSync(path, JSON.stringify({ ...entry, result }, null, 2));
     } catch (error) {
       console.warn("Could not persist handoff result:", error);
     }
   }
 
   private ensureHandoffDir() {
-    try {
-      mkdirSync(this.handoffDir, { recursive: true, mode: 0o700 });
-    } catch (error) {
-      console.warn("Could not create handoff directory:", error);
-    }
+    ensurePrivateDir(this.handoffDir);
   }
 
   private handoffActiveJobs(ctx: ExtensionContext) {
@@ -486,10 +493,9 @@ export class SubagentManager {
         command: job.command,
       };
       try {
-        writeFileSync(
+        atomicWriteFileSync(
           join(this.handoffDir, `${job.completionId}.json`),
           JSON.stringify(entry, null, 2),
-          { mode: 0o600 },
         );
       } catch (error) {
         console.warn("Could not persist handoff entry:", error);
@@ -503,9 +509,7 @@ export class SubagentManager {
 
   private writeStopMarker(completionId: string) {
     try {
-      writeFileSync(join(this.handoffDir, `${completionId}.stop`), "", {
-        mode: 0o600,
-      });
+      atomicWriteFileSync(join(this.handoffDir, `${completionId}.stop`), "");
     } catch (error) {
       console.warn("Could not persist stop marker:", error);
     }
@@ -719,80 +723,88 @@ export class SubagentManager {
     }
 
     const queued = ready.filter((item) => item.completion === "queue");
-    const batches: Array<
-      (typeof queued)[number] & { batchedItems: typeof queued }
-    > = [];
-    const byOrigin = new Map<string | null, typeof this.pendingCompletions>();
-    for (const item of queued) {
-      const group = byOrigin.get(item.originLeafId) ?? [];
-      group.push(item);
-      byOrigin.set(item.originLeafId, group);
-    }
-    for (const group of byOrigin.values()) {
-      let chunk: typeof this.pendingCompletions = [];
-      const flushChunk = () => {
-        if (!chunk.length) return;
-        const results = chunk.map((item) => {
-          try {
-            return JSON.parse(item.message);
-          } catch {
-            return item.message;
-          }
-        });
-        batches.push({
-          ...chunk[0],
-          message:
-            chunk.length === 1
-              ? chunk[0].message
-              : JSON.stringify({
-                  v: 1,
-                  type: "subagent",
-                  event: "batch",
-                  results,
-                }),
-          displayMessage: chunk
-            .map((item) => item.displayMessage ?? item.message)
-            .join("\n\n"),
-          completionId: undefined,
-          details: {
-            count: chunk.length,
-            completionIds: chunk.flatMap((entry) =>
-              entry.completionId ? [entry.completionId] : [],
-            ),
-          },
-          batchedItems: chunk,
-        });
-        chunk = [];
-      };
-      for (const item of group) {
-        const candidate = [...chunk, item].map((entry) => {
-          try {
-            return JSON.parse(entry.message);
-          } catch {
-            return entry.message;
-          }
-        });
-        if (
-          chunk.length &&
-          Buffer.byteLength(
-            JSON.stringify({
-              v: 1,
-              type: "subagent",
-              event: "batch",
-              results: candidate,
-            }),
-          ) > MODEL_OUTPUT_MAX_BYTES
-        )
-          flushChunk();
-        chunk.push(item);
+    const continued = ready.filter((item) => item.completion === "continue");
+
+    const batchItems = (
+      items: typeof ready,
+      completionMode: "queue" | "continue",
+    ) => {
+      const batches: Array<
+        (typeof items)[number] & { batchedItems: typeof items }
+      > = [];
+      const byOrigin = new Map<string | null, typeof items>();
+      for (const item of items) {
+        const group = byOrigin.get(item.originLeafId) ?? [];
+        group.push(item);
+        byOrigin.set(item.originLeafId, group);
       }
-      flushChunk();
-    }
+      for (const group of byOrigin.values()) {
+        let chunk: typeof items = [];
+        const flushChunk = () => {
+          if (!chunk.length) return;
+          const results = chunk.map((item) => {
+            try {
+              return JSON.parse(item.message);
+            } catch {
+              return item.message;
+            }
+          });
+          batches.push({
+            ...chunk[0],
+            completion: completionMode,
+            message:
+              chunk.length === 1
+                ? chunk[0].message
+                : JSON.stringify({
+                    v: 1,
+                    type: "subagent",
+                    event: "batch",
+                    results,
+                  }),
+            displayMessage: chunk
+              .map((item) => item.displayMessage ?? item.message)
+              .join("\n\n"),
+            completionId: undefined,
+            details: {
+              count: chunk.length,
+              completionIds: chunk.flatMap((entry) =>
+                entry.completionId ? [entry.completionId] : [],
+              ),
+            },
+            batchedItems: chunk,
+          });
+          chunk = [];
+        };
+        for (const item of group) {
+          const candidate = [...chunk, item].map((entry) => {
+            try {
+              return JSON.parse(entry.message);
+            } catch {
+              return entry.message;
+            }
+          });
+          if (
+            chunk.length &&
+            Buffer.byteLength(
+              JSON.stringify({
+                v: 1,
+                type: "subagent",
+                event: "batch",
+                results: candidate,
+              }),
+            ) > MODEL_OUTPUT_MAX_BYTES
+          )
+            flushChunk();
+          chunk.push(item);
+        }
+        flushChunk();
+      }
+      return batches;
+    };
+
     const deliver = [
-      ...ready
-        .filter((item) => item.completion === "continue")
-        .map((item) => ({ ...item, batchedItems: [item] })),
-      ...batches,
+      ...batchItems(continued, "continue"),
+      ...batchItems(queued, "queue"),
     ];
 
     for (const item of deliver) {

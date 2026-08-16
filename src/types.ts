@@ -27,13 +27,17 @@ export const getLogDir = (): string | undefined => {
   }
 };
 
-process.on("exit", () => {
-  if (logDir) {
-    try {
-      rmSync(logDir, { recursive: true, force: true });
-    } catch {}
-  }
-});
+const GLOBAL_LOG_CLEANUP_KEY = Symbol.for("pi-subagents.log-cleanup");
+if (!(globalThis as any)[GLOBAL_LOG_CLEANUP_KEY]) {
+  (globalThis as any)[GLOBAL_LOG_CLEANUP_KEY] = true;
+  process.on("exit", () => {
+    if (logDir) {
+      try {
+        rmSync(logDir, { recursive: true, force: true });
+      } catch {}
+    }
+  });
+}
 
 export const SUBAGENT_DIR = join(getAgentDir(), "pi-subagents");
 export const HANDOFF_DIR = join(SUBAGENT_DIR, "handoff");

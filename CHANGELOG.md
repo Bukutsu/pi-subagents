@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Isolate child session extensions via `extensionsOverride` on explicit `DefaultResourceLoader` to prevent recursive loading of `pi-subagents` and duplicate lifecycle hooks.
+- Check `git status --porcelain` before creating worktrees, preventing silent divergence from uncommitted parent changes.
+- Coalesce multiple automatic (`continue`) completions arriving on the same origin branch into a single batch message and parent wake-up.
+- Use atomic temporary-file-and-rename writes (`atomicWriteFileSync`) for index records, handoffs, and stop markers.
+- Guard process-exit handlers with global symbols to prevent listener accumulation on repeated session reloads.
 - Simplify the model-facing `subagent` tool to `prompt`, `worktree`, and `background`; legacy control and model-selection branches remain internal but are no longer advertised.
 - Make normal delegation automatically wake the parent on completion; use `background:true` to queue a result silently.
 - Add zero-configuration guidance: children inherit the parent model, thinking level, tools, and working directory.

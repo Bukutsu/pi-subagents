@@ -367,3 +367,32 @@ test("does not push api-key overrides onto a shared parent runtime or OAuth prov
     "fresh runtime with an api-key provider forwards the key",
   );
 });
+
+test("filters out pi-subagents extension to prevent recursive child loading", () => {
+  const baseExtensions: any = {
+    extensions: [
+      {
+        path: "/home/user/.pi/agent/extensions/pi-subagents/index.js",
+        resolvedPath: "/home/user/.pi/agent/extensions/pi-subagents/index.js",
+        tools: new Map([["subagent", {}]]),
+      },
+      {
+        path: "/home/user/.pi/agent/extensions/custom-tool/index.js",
+        resolvedPath: "/home/user/.pi/agent/extensions/custom-tool/index.js",
+        tools: new Map([["my_custom_tool", {}]]),
+      },
+    ],
+    errors: [],
+    runtime: {},
+  };
+
+  const filtered = baseExtensions.extensions.filter(
+    (ext: any) =>
+      !ext.tools.has("subagent") &&
+      !ext.path.includes("pi-subagents") &&
+      !ext.resolvedPath.includes("pi-subagents"),
+  );
+
+  assert.equal(filtered.length, 1);
+  assert.equal(filtered[0].tools.has("my_custom_tool"), true);
+});

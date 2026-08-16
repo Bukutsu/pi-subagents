@@ -3,6 +3,7 @@ import test from "node:test";
 import {
   mkdirSync,
   mkdtempSync,
+  readFileSync,
   rmSync,
   symlinkSync,
   writeFileSync,
@@ -11,6 +12,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import {
   acquireSessionLock,
+  atomicWriteFileSync,
   displayText,
   isSubagentRecord,
   readIndex,
@@ -267,4 +269,12 @@ test("retainLog uses timestamp-prefixed filenames for chronological sorting", ()
     const filename = logPath.split("/").pop() ?? "";
     assert.match(filename, /^\d+-[0-9a-f-]+\.log$/);
   }
+});
+
+test("atomicWriteFileSync writes file safely without temporary residues", () => {
+  const dir = mkdtempSync(join(tmpdir(), "pi-atomic-test-"));
+  const target = join(dir, "data.json");
+  atomicWriteFileSync(target, '{"hello":"world"}');
+  assert.equal(readFileSync(target, "utf8"), '{"hello":"world"}');
+  rmSync(dir, { recursive: true, force: true });
 });

@@ -642,39 +642,40 @@ export function registerSubagentModule(
           // trusted this checkout; never by default.
           projectTrusted: trusted,
         });
-        let resourceLoader: DefaultResourceLoader | undefined;
+        const agentDir = getAgentDir();
+        const resourceLoader = new DefaultResourceLoader({
+          cwd: opts.cwd,
+          agentDir,
+          settingsManager,
+          ...(temporaryExtensionPaths.length
+            ? { additionalExtensionPaths: temporaryExtensionPaths }
+            : {}),
+          extensionsOverride: (base) => ({
+            ...base,
+            extensions: base.extensions.filter(
+              (ext) =>
+                !ext.tools.has("subagent") &&
+                !ext.path.includes("pi-subagents") &&
+                !ext.resolvedPath.includes("pi-subagents"),
+            ),
+          }),
+          ...(!trusted
+            ? {
+                agentsFilesOverride: (base) => ({
+                  agentsFiles: base.agentsFiles.filter((f) =>
+                    f.path.startsWith(agentDir + sep),
+                  ),
+                }),
+              }
+            : {}),
+        });
         if (!trusted) {
-          // Untrusted children must not inherit project instructions
-          // (AGENTS.md / CLAUDE.md); keep the user's global context file.
-          const agentDir = getAgentDir();
-          resourceLoader = new DefaultResourceLoader({
-            cwd: opts.cwd,
-            agentDir,
-            settingsManager,
-            ...(temporaryExtensionPaths.length
-              ? { additionalExtensionPaths: temporaryExtensionPaths }
-              : {}),
-            agentsFilesOverride: (base) => ({
-              agentsFiles: base.agentsFiles.filter((f) =>
-                f.path.startsWith(agentDir + sep),
-              ),
-            }),
-          });
           // Global extensions remain available for tools, but cannot inject
           // project skills, prompts, or themes into an untrusted child.
           resourceLoader.extendResources = () => {};
-          await resourceLoader.reload();
-          checkSetup?.();
-        } else if (temporaryExtensionPaths.length) {
-          resourceLoader = new DefaultResourceLoader({
-            cwd: opts.cwd,
-            agentDir: getAgentDir(),
-            settingsManager,
-            additionalExtensionPaths: temporaryExtensionPaths,
-          });
-          await resourceLoader.reload();
-          checkSetup?.();
         }
+        await resourceLoader.reload();
+        checkSetup?.();
         const setupController = new AbortController();
         let created: Awaited<ReturnType<typeof createAgentSession>> | undefined;
         try {
@@ -796,13 +797,7 @@ export function registerSubagentModule(
               console.warn(`Subagent extension error: ${error.error}`),
           });
           checkSetup?.();
-          if (typeof (session as any)._modelRuntime?.refresh === "function") {
-            try {
-              await (session as any)._modelRuntime.refresh({
-                allowNetwork: false,
-              });
-            } catch {}
-          } else if (typeof runtime.refresh === "function") {
+          if (typeof runtime.refresh === "function") {
             try {
               await runtime.refresh({ allowNetwork: false });
             } catch {}
