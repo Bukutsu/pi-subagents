@@ -27,10 +27,6 @@ import { Type } from "typebox";
 import type { SubagentManager } from "./manager.js";
 import {
   getLogDir,
-  HISTORIC_SUBAGENT_LOCKS,
-  HISTORIC_SUBAGENT_SESSION_DIR,
-  LEGACY_SUBAGENT_LOCKS,
-  LEGACY_SUBAGENT_SESSION_DIR,
   SUBAGENT_INDEX,
   SUBAGENT_LOCKS,
   SUBAGENT_SESSION_DIR,
@@ -52,7 +48,6 @@ import {
   renderToolResult,
   resolveSubagentCwd,
   sanitizeTerminalOutput,
-  sanitizeForkMessages,
   saveRecord,
   serializeModelJson,
   SUBAGENT_SESSION_ROOTS,
@@ -1248,47 +1243,18 @@ export function registerSubagentModule(
         };
         try {
           if (existing) {
-            const lockDir = validatedSessionFile
-              ? isPathInside(
-                  HISTORIC_SUBAGENT_SESSION_DIR,
-                  validatedSessionFile,
-                )
-                ? HISTORIC_SUBAGENT_LOCKS
-                : isPathInside(
-                      LEGACY_SUBAGENT_SESSION_DIR,
-                      validatedSessionFile,
-                    )
-                  ? LEGACY_SUBAGENT_LOCKS
-                  : SUBAGENT_LOCKS
-              : SUBAGENT_LOCKS;
-            sessionLock = acquireSessionLock(existing.sessionId, lockDir);
+            sessionLock = acquireSessionLock(
+              existing.sessionId,
+              SUBAGENT_LOCKS,
+            );
           }
           sessionManager = existing
             ? SessionManager.open(
                 validatedSessionFile ?? existing.sessionFile,
-                isPathInside(
-                  HISTORIC_SUBAGENT_SESSION_DIR,
-                  validatedSessionFile ?? "",
-                )
-                  ? HISTORIC_SUBAGENT_SESSION_DIR
-                  : isPathInside(
-                        LEGACY_SUBAGENT_SESSION_DIR,
-                        validatedSessionFile ?? "",
-                      )
-                    ? LEGACY_SUBAGENT_SESSION_DIR
-                    : SUBAGENT_SESSION_DIR,
+                SUBAGENT_SESSION_DIR,
                 childCwd,
               )
-            : SessionManager.create(
-                childCwd,
-                SUBAGENT_SESSION_DIR,
-                context === "fork"
-                  ? { parentSession: ctx.sessionManager.getSessionFile() }
-                  : undefined,
-              );
-          if (!existing && context === "fork")
-            for (const parentMessage of sanitizeForkMessages(ctx))
-              sessionManager.appendMessage(parentMessage as any);
+            : SessionManager.create(childCwd, SUBAGENT_SESSION_DIR);
           const actualSessionId = sessionManager.getSessionId();
           if (existing && actualSessionId !== existing.sessionId) {
             throw new Error(

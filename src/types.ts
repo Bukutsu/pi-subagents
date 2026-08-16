@@ -48,28 +48,6 @@ export const SUBAGENT_INDEX = join(SUBAGENT_DIR, "index");
 export const SUBAGENT_LOCKS = join(SUBAGENT_DIR, "locks");
 export const SUBAGENT_WORKTREES = join(SUBAGENT_DIR, "worktrees");
 
-// Preserve access to sessions created before the package was renamed from
-// pi-background-agents. New records continue to use the pi-subagents paths.
-export const LEGACY_SUBAGENT_DIR = join(getAgentDir(), "pi-background-agents");
-export const HISTORIC_SUBAGENT_DIR = join(getAgentDir(), "pi-bg");
-export const LEGACY_SUBAGENT_SESSION_DIR = join(
-  LEGACY_SUBAGENT_DIR,
-  "sessions",
-);
-export const LEGACY_SUBAGENT_INDEX = join(LEGACY_SUBAGENT_DIR, "index");
-export const LEGACY_SUBAGENT_LOCKS = join(LEGACY_SUBAGENT_DIR, "locks");
-export const LEGACY_SUBAGENT_WORKTREES = join(LEGACY_SUBAGENT_DIR, "worktrees");
-export const HISTORIC_SUBAGENT_SESSION_DIR = join(
-  HISTORIC_SUBAGENT_DIR,
-  "sessions",
-);
-export const HISTORIC_SUBAGENT_INDEX = join(HISTORIC_SUBAGENT_DIR, "index");
-export const HISTORIC_SUBAGENT_LOCKS = join(HISTORIC_SUBAGENT_DIR, "locks");
-export const HISTORIC_SUBAGENT_WORKTREES = join(
-  HISTORIC_SUBAGENT_DIR,
-  "worktrees",
-);
-
 export type TerminalState =
   "finished" | "failed" | "stopped" | "timed-out" | "interrupted";
 

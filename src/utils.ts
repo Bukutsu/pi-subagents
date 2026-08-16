@@ -25,14 +25,6 @@ import type {
 } from "@earendil-works/pi-coding-agent";
 import { Markdown, Text } from "@earendil-works/pi-tui";
 import {
-  HISTORIC_SUBAGENT_INDEX,
-  HISTORIC_SUBAGENT_LOCKS,
-  HISTORIC_SUBAGENT_SESSION_DIR,
-  HISTORIC_SUBAGENT_WORKTREES,
-  LEGACY_SUBAGENT_INDEX,
-  LEGACY_SUBAGENT_LOCKS,
-  LEGACY_SUBAGENT_SESSION_DIR,
-  LEGACY_SUBAGENT_WORKTREES,
   SUBAGENT_INDEX,
   SUBAGENT_LOCKS,
   SUBAGENT_SESSION_DIR,
@@ -42,7 +34,6 @@ import {
 
 export const MODEL_OUTPUT_MAX_BYTES = 16 * 1024;
 export const MODEL_OUTPUT_MAX_LINES = 400;
-const FORK_CONTEXT_MAX_BYTES = 64 * 1024;
 
 export function serializeModelJson(
   value: Record<string, unknown>,
@@ -200,11 +191,7 @@ export function isSubagentRecord(value: unknown): value is SubagentRecord {
   );
 }
 
-export const SUBAGENT_INDEX_ROOTS = [
-  HISTORIC_SUBAGENT_INDEX,
-  LEGACY_SUBAGENT_INDEX,
-  SUBAGENT_INDEX,
-];
+export const SUBAGENT_INDEX_ROOTS = [SUBAGENT_INDEX];
 
 export function readIndex(
   indexDirs: readonly string[] = SUBAGENT_INDEX_ROOTS,
@@ -280,182 +267,6 @@ export function usageSince(current: SessionStats, baseline: SessionStats) {
     total: (current.tokens?.total ?? 0) - (baseline.tokens?.total ?? 0),
     cost: (current.cost ?? 0) - (baseline.cost ?? 0),
   };
-}
-
-export function sanitizeForkMessages(ctx: ExtensionContext) {
-  const messages = buildSessionContext(ctx.sessionManager.getBranch()).messages;
-  const capContent = (content: unknown) => {
-    if (typeof content === "string")
-      return truncateTail(content, {
-        maxBytes: MODEL_OUTPUT_MAX_BYTES,
-        maxLines: MODEL_OUTPUT_MAX_LINES,
-      }).content;
-    if (!Array.isArray(content)) return content;
-    return content.flatMap((part) => {
-      if (!part || typeof part !== "object") return [];
-      if (part.type === "image")
-        return [{ type: "text", text: "[parent image omitted from fork]" }];
-      if (part.type === "text" && typeof part.text === "string")
-        return [
-          {
-            ...part,
-            text: truncateTail(part.text, {
-              maxBytes: MODEL_OUTPUT_MAX_BYTES,
-              maxLines: MODEL_OUTPUT_MAX_LINES,
-            }).content,
-          },
-        ];
-      return [part];
-    });
-  };
-  const resultIds = new Set(
-    messages.flatMap((message) =>
-      message.role === "toolResult" &&
-      !["bg", "subagent"].includes(message.toolName)
-        ? [message.toolCallId]
-        : [],
-    ),
-  );
-  const callIds = new Set<string>();
-  const sanitized: Array<Record<string, unknown>> = [];
-  for (const message of messages) {
-    if (
-      message.role === "custom" &&
-      message.customType === "pi-subagent-result"
-    )
-      continue;
-    if (
-      message.role === "compactionSummary" ||
-      message.role === "branchSummary"
-    ) {
-      sanitized.push({
-        role: "user",
-        content: capContent(`Parent conversation summary:\n${message.summary}`),
-        timestamp: message.timestamp,
-      });
-      continue;
-    }
-    if (message.role === "assistant") {
-      if (typeof message.content === "string") {
-        sanitized.push({
-          ...message,
-          content: capContent(message.content),
-        } as unknown as Record<string, unknown>);
-        continue;
-      }
-      if (!Array.isArray(message.content)) continue;
-      const content = message.content.flatMap((part: any) => {
-        if (part.type !== "toolCall") {
-          const capped = capContent([part]);
-          return Array.isArray(capped) ? capped : [];
-        }
-        if (
-          ["bg", "subagent"].includes(part.name) ||
-          !resultIds.has(part.id) ||
-          Buffer.byteLength(JSON.stringify(part)) > MODEL_OUTPUT_MAX_BYTES
-        )
-          return [];
-        callIds.add(part.id);
-        return [part];
-      });
-      if (content.length)
-        sanitized.push({
-          ...message,
-          content,
-          usage: undefined,
-        });
-      continue;
-    }
-    if (message.role === "toolResult") {
-      if (callIds.has(message.toolCallId))
-        sanitized.push({
-          ...message,
-          content: capContent(message.content),
-          usage: undefined,
-        });
-      continue;
-    }
-    sanitized.push({
-      ...message,
-      ...(Object.hasOwn(message, "content")
-        ? { content: capContent((message as any).content) }
-        : {}),
-    } as unknown as Record<string, unknown>);
-  }
-
-  const groups: Array<Array<Record<string, unknown>>> = [];
-  for (const message of sanitized) {
-    if (message.role === "user") groups.push([]);
-    if (groups.length) groups.at(-1)!.push(message);
-  }
-  const assistantTextOnly = (assistant: Record<string, unknown>) => {
-    const content = assistant.content;
-    const text =
-      typeof content === "string"
-        ? content
-        : Array.isArray(content)
-          ? content
-              .filter(
-                (part: any) =>
-                  part?.type === "text" && typeof part.text === "string",
-              )
-              .map((part: any) => part.text)
-              .join("\n")
-          : "";
-    return {
-      ...assistant,
-      content: truncateTail(text, {
-        maxBytes: MODEL_OUTPUT_MAX_BYTES,
-        maxLines: MODEL_OUTPUT_MAX_LINES,
-      }).content,
-    };
-  };
-  const trimGroup = (group: Array<Record<string, unknown>>) => {
-    const user = group[0];
-    const units: Array<Array<Record<string, unknown>>> = [];
-    for (const message of group.slice(1)) {
-      if (message.role !== "toolResult") units.push([]);
-      if (units.length) units.at(-1)!.push(message);
-    }
-    const kept: Array<Record<string, unknown>> = user ? [user] : [];
-    for (const unit of units.reverse()) {
-      if (
-        Buffer.byteLength(JSON.stringify([user, ...unit, ...kept.slice(1)])) <=
-        FORK_CONTEXT_MAX_BYTES
-      ) {
-        kept.splice(1, 0, ...unit);
-        continue;
-      }
-      // Oversized unit: keep the newest assistant reply as text only (tool
-      // calls and their results are dropped together so provider context
-      // stays well-formed) instead of losing the answer silently.
-      const assistant = unit.find((message) => message.role === "assistant");
-      if (
-        assistant &&
-        !kept.includes(assistant) &&
-        Buffer.byteLength(
-          JSON.stringify([
-            user,
-            assistantTextOnly(assistant),
-            ...kept.slice(1),
-          ]),
-        ) <= FORK_CONTEXT_MAX_BYTES
-      )
-        kept.splice(1, 0, assistantTextOnly(assistant));
-    }
-    return kept;
-  };
-  const bounded: Array<Record<string, unknown>> = [];
-  for (const original of groups.reverse()) {
-    const group = trimGroup(original);
-    const candidate = [...group, ...bounded];
-    if (Buffer.byteLength(JSON.stringify(candidate)) > FORK_CONTEXT_MAX_BYTES) {
-      if (!bounded.length) bounded.push(...group);
-      break;
-    }
-    bounded.unshift(...group);
-  }
-  return bounded as any;
 }
 
 export function processIsAlive(pid?: number) {
@@ -589,17 +400,8 @@ export function isPathInsideAny(roots: string[], target: string) {
   return roots.some((root) => isPathInside(root, target));
 }
 
-export const SUBAGENT_SESSION_ROOTS = [
-  SUBAGENT_SESSION_DIR,
-  LEGACY_SUBAGENT_SESSION_DIR,
-  HISTORIC_SUBAGENT_SESSION_DIR,
-];
-
-export const SUBAGENT_WORKTREE_ROOTS = [
-  SUBAGENT_WORKTREES,
-  LEGACY_SUBAGENT_WORKTREES,
-  HISTORIC_SUBAGENT_WORKTREES,
-];
+export const SUBAGENT_SESSION_ROOTS = [SUBAGENT_SESSION_DIR];
+export const SUBAGENT_WORKTREE_ROOTS = [SUBAGENT_WORKTREES];
 
 export function resolveSubagentCwd(parent: string, requested?: string) {
   // Models sometimes emit a leading @ in tool path arguments; strip it before
