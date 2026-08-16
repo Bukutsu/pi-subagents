@@ -4,40 +4,8 @@ import type {
 } from "@earendil-works/pi-coding-agent";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import { randomUUID } from "node:crypto";
-import {
-  mkdirSync,
-  mkdtempSync,
-  readdirSync,
-  rmSync,
-  writeFileSync,
-} from "node:fs";
-import { tmpdir } from "node:os";
+import { mkdirSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-
-let logDir: string | undefined;
-let logDirUnavailable = false;
-export const getLogDir = (): string | undefined => {
-  if (logDir || logDirUnavailable) return logDir;
-  try {
-    return (logDir = mkdtempSync(join(tmpdir(), "pi-subagents-")));
-  } catch (error) {
-    logDirUnavailable = true;
-    console.warn("Could not create subagent output log directory:", error);
-    return undefined;
-  }
-};
-
-const GLOBAL_LOG_CLEANUP_KEY = Symbol.for("pi-subagents.log-cleanup");
-if (!(globalThis as any)[GLOBAL_LOG_CLEANUP_KEY]) {
-  (globalThis as any)[GLOBAL_LOG_CLEANUP_KEY] = true;
-  process.on("exit", () => {
-    if (logDir) {
-      try {
-        rmSync(logDir, { recursive: true, force: true });
-      } catch {}
-    }
-  });
-}
 
 export const SUBAGENT_DIR = join(getAgentDir(), "pi-subagents");
 export const HANDOFF_DIR = join(SUBAGENT_DIR, "handoff");
@@ -50,6 +18,24 @@ export const SUBAGENT_WORKTREES = join(SUBAGENT_DIR, "worktrees");
 
 export type TerminalState =
   "finished" | "failed" | "stopped" | "timed-out" | "interrupted";
+
+export interface SubagentToolArgs {
+  action?: "spawn" | "status" | "stop" | "steer" | "models";
+  prompt?: string;
+  description?: string;
+  sessionId?: string;
+  message?: string;
+  completion?: "queue" | "continue";
+  modelOffset?: number;
+  model?: string;
+  thinking?: string;
+  tools?: string;
+  cwd?: string;
+  worktree?: boolean;
+  background?: boolean;
+  context?: "project" | "fork";
+  timeoutSec?: number;
+}
 
 export interface SubagentRecord {
   sessionId: string;
@@ -72,6 +58,14 @@ export interface SubagentRecord {
   ownerPid?: number;
 }
 
+export type SubagentJobSession =
+  | AgentSession
+  | (Partial<AgentSession> & {
+      model?: AgentSession["model"];
+      thinkingLevel?: AgentSession["thinkingLevel"];
+      getSessionStats: () => SessionStats;
+    });
+
 export interface SubagentJob {
   pid: number;
   command: string;
@@ -85,7 +79,7 @@ export interface SubagentJob {
   originSessionFile: string;
   originSessionId: string;
   handedOff?: boolean;
-  session: AgentSession;
+  session: SubagentJobSession;
   activity?: string;
   baseline: SessionStats;
   record: SubagentRecord;

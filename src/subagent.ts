@@ -26,7 +26,6 @@ import { Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import type { SubagentManager } from "./manager.js";
 import {
-  getLogDir,
   SUBAGENT_INDEX,
   SUBAGENT_LOCKS,
   SUBAGENT_SESSION_DIR,
@@ -34,6 +33,7 @@ import {
   retainLog,
   type SubagentJob,
   type SubagentRecord,
+  type SubagentToolArgs,
   type TerminalState,
 } from "./types.js";
 import {
@@ -263,7 +263,7 @@ export function registerSubagentModule(
         }),
       ),
     }),
-    async execute(_id, args: any, signal, _up, ctx) {
+    async execute(_id, args: SubagentToolArgs, signal, _up, ctx) {
       // Keep the old control payloads readable for durable sessions and direct
       // callers, while exposing only the small spawn contract above to the LLM.
       let {
@@ -1016,7 +1016,7 @@ export function registerSubagentModule(
         if (!message?.trim()) throw new Error("message is required for steer");
         // session.steer() only queues while the agent is streaming; reject
         // instead of silently losing guidance to a completion race.
-        if (!matching.session.isStreaming)
+        if (!matching.session.isStreaming || !matching.session.steer)
           throw new Error(
             `Subagent ${matching.sessionId} is not currently running`,
           );
@@ -1577,14 +1577,6 @@ export function registerSubagentModule(
               const retained = bytes.subarray(0, MAX_FULL_OUTPUT_BYTES);
               // Retained logs are durable (survive process exit and updates).
               retainedLogFile = retainLog(retained);
-              if (!retainedLogFile) {
-                const logDir = getLogDir();
-                if (logDir) {
-                  const logFile = join(logDir, `${randomUUID()}.log`);
-                  writeFileSync(logFile, retained, { mode: 0o600 });
-                  retainedLogFile = logFile;
-                }
-              }
               truncationNote = retainedLogFile
                 ? bytes.length > retained.length
                   ? `\n\nResult truncated; retained output log (capped at ${MAX_FULL_OUTPUT_BYTES} bytes): ${retainedLogFile}`

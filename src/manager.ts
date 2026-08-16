@@ -22,6 +22,7 @@ import {
   SUBAGENT_DIR,
   SUBAGENT_SESSION_DIR,
   type SubagentJob,
+  type SubagentJobSession,
   type SubagentRecord,
 } from "./types.js";
 
@@ -56,12 +57,17 @@ export interface HandoffEntry {
   };
 }
 
-const HANDED_OFF_SESSION: any = {
+const HANDED_OFF_SESSION: SubagentJobSession = {
   model: undefined,
   thinkingLevel: undefined,
   getSessionStats: () => ({
+    sessionId: "",
+    sessionFile: "",
+    userMessages: 0,
     assistantMessages: 0,
     toolCalls: 0,
+    toolResults: 0,
+    totalMessages: 0,
     tokens: {
       input: 0,
       output: 0,
@@ -221,11 +227,11 @@ export class SubagentManager {
     });
 
     this.pi.on("before_agent_start", (_event, ctx) => {
-      this.flushPendingCompletions(ctx);
+      this.drainHandoffs(ctx);
     });
 
     this.pi.on("agent_settled", (_event, ctx) => {
-      this.flushPendingCompletions(ctx);
+      this.drainHandoffs(ctx);
     });
 
     this.pi.on("message_end", (event) => {
@@ -242,7 +248,7 @@ export class SubagentManager {
     });
 
     this.pi.on("session_tree", (_event, ctx) => {
-      this.flushPendingCompletions(ctx);
+      this.drainHandoffs(ctx);
     });
 
     this.pi.on("session_shutdown", async (event, ctx) => {
@@ -253,6 +259,10 @@ export class SubagentManager {
       if (this.widgetTimer) {
         clearInterval(this.widgetTimer);
         this.widgetTimer = undefined;
+      }
+      if (this.handoffWatcher) {
+        clearInterval(this.handoffWatcher);
+        this.handoffWatcher = undefined;
       }
       if (event.reason === "quit") {
         for (const [pid, job] of this.jobs) {

@@ -48,3 +48,35 @@ test("creates worktree when repository is clean", async () => {
     calls.some((c) => c.includes("status") && c.includes("--porcelain")),
   );
 });
+
+test("serializes concurrent worktree creations on the same repository", async () => {
+  let inFlight = 0;
+  let maxConcurrent = 0;
+  const pi: any = {
+    exec: async (cmd: string, args: string[]) => {
+      if (cmd === "git" && args[0] === "rev-parse") {
+        return { code: 0, stdout: process.cwd(), stderr: "" };
+      }
+      if (cmd === "git" && args[0] === "status") {
+        inFlight++;
+        maxConcurrent = Math.max(maxConcurrent, inFlight);
+        await new Promise((r) => setTimeout(r, 10));
+        inFlight--;
+        return { code: 0, stdout: "", stderr: "" };
+      }
+      if (cmd === "git" && args.includes("worktree")) {
+        return { code: 0, stdout: "Preparing worktree", stderr: "" };
+      }
+      return { code: 0, stdout: "", stderr: "" };
+    },
+  };
+  const ctx: any = { cwd: process.cwd() };
+
+  const [res1, res2] = await Promise.all([
+    createWorktree(pi, ctx),
+    createWorktree(pi, ctx),
+  ]);
+
+  assert.equal(maxConcurrent, 1);
+  assert.notEqual(res1.branch, res2.branch);
+});

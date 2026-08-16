@@ -43,6 +43,32 @@ export async function getGitCommonDir(
   }
 }
 
+const repoLocks = new Map<string, Promise<unknown>>();
+
+export function withRepoLock<T>(
+  root: string,
+  fn: () => Promise<T>,
+): Promise<T> {
+  const current = repoLocks.get(root) ?? Promise.resolve();
+  let release: () => void = () => {};
+  const next = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  repoLocks.set(
+    root,
+    current.then(
+      () => next,
+      () => next,
+    ),
+  );
+  return current.then(fn, fn).finally(() => {
+    release();
+    if (repoLocks.get(root) === next) {
+      repoLocks.delete(root);
+    }
+  });
+}
+
 export async function removeWorktree(
   pi: ExtensionAPI,
   cwd: string,
@@ -59,40 +85,49 @@ export async function removeWorktree(
     });
     if (res.code === 0) root = res.stdout.trim();
   } catch {}
-  let removed = false;
-  try {
-    const res = await pi.exec(
-      "git",
-      ["-c", "core.hooksPath=/dev/null", "worktree", "remove", "--force", path],
-      {
-        cwd: root,
-      },
-    );
-    removed = res.code === 0;
-  } catch {}
-  try {
-    rmSync(path, { recursive: true, force: true });
-  } catch {}
-  // If git removal failed, drop the stale registration so the branch is not
-  // left "checked out"; delete the branch either way (best effort).
-  if (!removed) {
+  return withRepoLock(root, async () => {
+    let removed = false;
     try {
-      await pi.exec(
+      const res = await pi.exec(
         "git",
-        ["-c", "core.hooksPath=/dev/null", "worktree", "prune"],
-        { cwd: root },
+        [
+          "-c",
+          "core.hooksPath=/dev/null",
+          "worktree",
+          "remove",
+          "--force",
+          path,
+        ],
+        {
+          cwd: root,
+        },
       );
+      removed = res.code === 0;
     } catch {}
-  }
-  if (branch) {
     try {
-      await pi.exec(
-        "git",
-        ["-c", "core.hooksPath=/dev/null", "branch", "-D", branch],
-        { cwd: root },
-      );
+      rmSync(path, { recursive: true, force: true });
     } catch {}
-  }
+    // If git removal failed, drop the stale registration so the branch is not
+    // left "checked out"; delete the branch either way (best effort).
+    if (!removed) {
+      try {
+        await pi.exec(
+          "git",
+          ["-c", "core.hooksPath=/dev/null", "worktree", "prune"],
+          { cwd: root },
+        );
+      } catch {}
+    }
+    if (branch) {
+      try {
+        await pi.exec(
+          "git",
+          ["-c", "core.hooksPath=/dev/null", "branch", "-D", branch],
+          { cwd: root },
+        );
+      } catch {}
+    }
+  });
 }
 
 export async function createWorktree(
@@ -109,38 +144,48 @@ export async function createWorktree(
       `worktree:true requires a Git worktree: ${rootResult.stderr.trim() || ctx.cwd}`,
     );
   const root = realpathSync(rootResult.stdout.trim());
-  const statusResult = await pi.exec("git", ["status", "--porcelain"], {
-    cwd: root,
-    signal,
-  });
-  if (statusResult.code === 0 && statusResult.stdout.trim().length > 0) {
-    throw new Error(
-      "Cannot create worktree: parent repository has uncommitted changes. Commit or stash them before using worktree:true.",
-    );
-  }
-  const id = randomUUID().slice(0, 8);
-  const branch = `pi-subagents/${Date.now()}-${id}`;
-  ensurePrivateDir(SUBAGENT_WORKTREES);
-  const path = join(SUBAGENT_WORKTREES, `${basename(root)}-${id}`);
-  try {
-    const result = await pi.exec(
-      "git",
-      ["-c", "core.hooksPath=/dev/null", "worktree", "add", "-b", branch, path],
-      { cwd: root, signal },
-    );
-    if (result.code !== 0)
+  return withRepoLock(root, async () => {
+    const statusResult = await pi.exec("git", ["status", "--porcelain"], {
+      cwd: root,
+      signal,
+    });
+    if (statusResult.code === 0 && statusResult.stdout.trim().length > 0) {
       throw new Error(
-        `Could not create worktree: ${result.stderr.trim() || result.stdout.trim()}`,
+        "Cannot create worktree: parent repository has uncommitted changes. Commit or stash them before using worktree:true.",
       );
-  } catch (error) {
-    // The add may have failed before creating this branch. Do not pass the
-    // generated name to cleanup: it could already belong to someone else.
-    await removeWorktree(pi, root, path);
-    throw error;
-  }
-  let resolvedPath = path;
-  try {
-    resolvedPath = realpathSync(path);
-  } catch {}
-  return { branch, path: resolvedPath };
+    }
+    const id = randomUUID().slice(0, 8);
+    const branch = `pi-subagents/${Date.now()}-${id}`;
+    ensurePrivateDir(SUBAGENT_WORKTREES);
+    const path = join(SUBAGENT_WORKTREES, `${basename(root)}-${id}`);
+    try {
+      const result = await pi.exec(
+        "git",
+        [
+          "-c",
+          "core.hooksPath=/dev/null",
+          "worktree",
+          "add",
+          "-b",
+          branch,
+          path,
+        ],
+        { cwd: root, signal },
+      );
+      if (result.code !== 0)
+        throw new Error(
+          `Could not create worktree: ${result.stderr.trim() || result.stdout.trim()}`,
+        );
+    } catch (error) {
+      // The add may have failed before creating this branch. Do not pass the
+      // generated name to cleanup: it could already belong to someone else.
+      await removeWorktree(pi, root, path);
+      throw error;
+    }
+    let resolvedPath = path;
+    try {
+      resolvedPath = realpathSync(path);
+    } catch {}
+    return { branch, path: resolvedPath };
+  });
 }
