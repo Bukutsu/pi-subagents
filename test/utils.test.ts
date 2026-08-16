@@ -151,10 +151,9 @@ test("serializeModelJson enforces the final byte cap", async () => {
 
 test("retainLog uses timestamp-prefixed filenames for chronological sorting", () => {
   const logPath = retainLog("test log content");
-  if (logPath) {
-    const filename = logPath.split("/").pop() ?? "";
-    assert.match(filename, /^\d+-[0-9a-f-]+\.log$/);
-  }
+  assert.ok(logPath, "retainLog should return a valid file path");
+  const filename = logPath.split("/").pop() ?? "";
+  assert.match(filename, /^\d+-[0-9a-f-]+\.log$/);
 });
 
 test("atomicWriteFileSync writes file safely without temporary residues", () => {

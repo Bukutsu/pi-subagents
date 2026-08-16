@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import {
   existsSync,
+  readFileSync,
   realpathSync,
   rmSync,
   statSync,
@@ -42,6 +43,7 @@ import {
   getScopedModels,
   isPathInside,
   isPathInsideAny,
+  isSubagentRecord,
   MODEL_OUTPUT_MAX_BYTES,
   MODEL_OUTPUT_MAX_LINES,
   readIndex,
@@ -320,6 +322,15 @@ export function registerSubagentModule(
           "running sessions",
         );
       const findDurableRecord = (id: string) => {
+        if (/^[a-zA-Z0-9-]+$/.test(id)) {
+          const directFile = join(SUBAGENT_INDEX, `${id}.json`);
+          if (existsSync(directFile)) {
+            try {
+              const record = JSON.parse(readFileSync(directFile, "utf8"));
+              if (isSubagentRecord(record)) return record;
+            } catch {}
+          }
+        }
         const durable = getDurable();
         if (Object.hasOwn(durable, id)) return durable[id];
         return findBySessionPrefix(Object.values(durable), id, "sessions");
@@ -866,6 +877,12 @@ export function registerSubagentModule(
       };
 
       if (action === "models") {
+        const parentRuntime = (ctx.modelRegistry as any)?.runtime;
+        if (parentRuntime && typeof parentRuntime.refresh === "function") {
+          try {
+            await parentRuntime.refresh({ allowNetwork: false });
+          } catch {}
+        }
         const unrestricted = !scopeRestricted;
         const allModels = (
           unrestricted
@@ -1465,6 +1482,7 @@ export function registerSubagentModule(
                 manager.syncStatus(ctx);
               }
             }, TOOL_ACTIVITY_HOLD_MS);
+            activityTimer.unref?.();
           }
           return;
         }
@@ -1513,6 +1531,7 @@ export function registerSubagentModule(
           controller.abort();
         }
       }, timeoutSec * 1000);
+      timer.unref?.();
       const done = (async () => {
         try {
           let thrown: string | undefined;

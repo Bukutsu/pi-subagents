@@ -220,6 +220,14 @@ export class SubagentManager {
         if (job.activity === "finishing (session reload)") {
           job.activity = undefined;
         }
+        if (job.completionId) {
+          const path = join(this.handoffDir, `${job.completionId}.json`);
+          if (existsSync(path)) {
+            try {
+              rmSync(path, { force: true });
+            } catch {}
+          }
+        }
       }
       this.drainHandoffs(ctx);
       this.flushPendingCompletions(ctx);
@@ -559,6 +567,11 @@ export class SubagentManager {
         const entry = JSON.parse(readFileSync(path, "utf8")) as HandoffEntry;
         if (!entry.result && Date.now() - entry.startedAt > 10 * 60 * 1000) {
           rmSync(path, { force: true });
+          if (entry.completionId) {
+            rmSync(join(this.handoffDir, `${entry.completionId}.stop`), {
+              force: true,
+            });
+          }
           continue;
         }
         const currentFile = ctx.sessionManager.getSessionFile() ?? "";

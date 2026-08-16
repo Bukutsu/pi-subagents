@@ -54,19 +54,59 @@ export function withRepoLock<T>(
   const next = new Promise<void>((resolve) => {
     release = resolve;
   });
-  repoLocks.set(
-    root,
-    current.then(
-      () => next,
-      () => next,
-    ),
+  const chained = current.then(
+    () => next,
+    () => next,
   );
+  repoLocks.set(root, chained);
   return current.then(fn, fn).finally(() => {
     release();
-    if (repoLocks.get(root) === next) {
+    if (repoLocks.get(root) === chained) {
       repoLocks.delete(root);
     }
   });
+}
+
+async function internalRemoveWorktree(
+  pi: ExtensionAPI,
+  root: string,
+  path: string,
+  branch?: string,
+): Promise<void> {
+  let removed = false;
+  try {
+    const res = await pi.exec(
+      "git",
+      ["-c", "core.hooksPath=/dev/null", "worktree", "remove", "--force", path],
+      {
+        cwd: root,
+      },
+    );
+    removed = res.code === 0;
+  } catch {}
+  try {
+    rmSync(path, { recursive: true, force: true });
+  } catch {}
+  // If git removal failed, drop the stale registration so the branch is not
+  // left "checked out"; delete the branch either way (best effort).
+  if (!removed) {
+    try {
+      await pi.exec(
+        "git",
+        ["-c", "core.hooksPath=/dev/null", "worktree", "prune"],
+        { cwd: root },
+      );
+    } catch {}
+  }
+  if (branch) {
+    try {
+      await pi.exec(
+        "git",
+        ["-c", "core.hooksPath=/dev/null", "branch", "-D", branch],
+        { cwd: root },
+      );
+    } catch {}
+  }
 }
 
 export async function removeWorktree(
@@ -85,49 +125,9 @@ export async function removeWorktree(
     });
     if (res.code === 0) root = res.stdout.trim();
   } catch {}
-  return withRepoLock(root, async () => {
-    let removed = false;
-    try {
-      const res = await pi.exec(
-        "git",
-        [
-          "-c",
-          "core.hooksPath=/dev/null",
-          "worktree",
-          "remove",
-          "--force",
-          path,
-        ],
-        {
-          cwd: root,
-        },
-      );
-      removed = res.code === 0;
-    } catch {}
-    try {
-      rmSync(path, { recursive: true, force: true });
-    } catch {}
-    // If git removal failed, drop the stale registration so the branch is not
-    // left "checked out"; delete the branch either way (best effort).
-    if (!removed) {
-      try {
-        await pi.exec(
-          "git",
-          ["-c", "core.hooksPath=/dev/null", "worktree", "prune"],
-          { cwd: root },
-        );
-      } catch {}
-    }
-    if (branch) {
-      try {
-        await pi.exec(
-          "git",
-          ["-c", "core.hooksPath=/dev/null", "branch", "-D", branch],
-          { cwd: root },
-        );
-      } catch {}
-    }
-  });
+  return withRepoLock(root, () =>
+    internalRemoveWorktree(pi, root, path, branch),
+  );
 }
 
 export async function createWorktree(
@@ -179,7 +179,7 @@ export async function createWorktree(
     } catch (error) {
       // The add may have failed before creating this branch. Do not pass the
       // generated name to cleanup: it could already belong to someone else.
-      await removeWorktree(pi, root, path);
+      await internalRemoveWorktree(pi, root, path);
       throw error;
     }
     let resolvedPath = path;

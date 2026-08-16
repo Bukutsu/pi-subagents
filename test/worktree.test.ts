@@ -80,3 +80,30 @@ test("serializes concurrent worktree creations on the same repository", async ()
   assert.equal(maxConcurrent, 1);
   assert.notEqual(res1.branch, res2.branch);
 });
+
+test("cleans up worktree on creation failure without deadlock", async () => {
+  const calls: string[][] = [];
+  const pi: any = {
+    exec: async (cmd: string, args: string[]) => {
+      calls.push([cmd, ...args]);
+      if (cmd === "git" && args[0] === "rev-parse") {
+        return { code: 0, stdout: process.cwd(), stderr: "" };
+      }
+      if (cmd === "git" && args[0] === "status") {
+        return { code: 0, stdout: "", stderr: "" };
+      }
+      if (cmd === "git" && args.includes("add")) {
+        return { code: 1, stdout: "", stderr: "fatal: branch already exists" };
+      }
+      return { code: 0, stdout: "", stderr: "" };
+    },
+  };
+  const ctx: any = { cwd: process.cwd() };
+
+  await assert.rejects(
+    () => createWorktree(pi, ctx),
+    /fatal: branch already exists/,
+  );
+
+  assert.ok(calls.some((c) => c.includes("remove")));
+});

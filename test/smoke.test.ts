@@ -306,6 +306,14 @@ test("refreshes model runtime snapshot after binding extensions", async () => {
   const { tools } = setup();
   const subagent = tools.find((tool) => tool.name === "subagent");
   assert.ok(subagent);
+  await subagent.execute(
+    "models-refresh",
+    { action: "models" },
+    undefined,
+    undefined,
+    ctx,
+  );
+  assert.equal(refreshCalled, true);
 });
 
 test("prepares raw tool call arguments with array tools", () => {
