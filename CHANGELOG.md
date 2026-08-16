@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Bundle `multi-agent-worktree` skill providing practical guidance on parallel editing, environment replication, port isolation, baseline test verification, and clean git branch integration.
 - Isolate child session extensions via `extensionsOverride` on explicit `DefaultResourceLoader` to prevent recursive loading of `pi-subagents` and duplicate lifecycle hooks.
 - Check `git status --porcelain` before creating worktrees, preventing silent divergence from uncommitted parent changes.
 - Coalesce multiple automatic (`continue`) completions arriving on the same origin branch into a single batch message and parent wake-up.
