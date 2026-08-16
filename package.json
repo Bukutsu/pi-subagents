@@ -1,7 +1,7 @@
 {
   "name": "pi-subagents",
   "version": "0.4.11",
-  "description": "SDK-native background subagents for Pi",
+  "description": "SDK-native zero-configuration background subagents for Pi",
   "type": "module",
   "keywords": [
     "pi-package",

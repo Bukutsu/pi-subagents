@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Simplify the model-facing `subagent` tool to `prompt`, `worktree`, and `background`; legacy control and model-selection branches remain internal but are no longer advertised.
+- Make normal delegation automatically wake the parent on completion; use `background:true` to queue a result silently.
+- Add zero-configuration guidance: children inherit the parent model, thinking level, tools, and working directory.
 - Add `prepareArguments` compatibility shim to automatically normalize array-formatted `tools` parameters (e.g. `["read", "bash"]`).
 - Fix `retainLog` file pruning to use timestamp-prefixed filenames for accurate chronological log pruning.
 - Ensure `removeLock` in subagent lifecycle is idempotent to prevent deleting newly acquired locks during forced stop cleanup.
@@ -18,7 +21,7 @@
 - Query the live, available session model scope with paginated `action:models`; do not cache unsaved scope edits.
 - Resume atomically on a current scoped fallback and persist effective model/thinking changes.
 - Use compact model-visible JSON, final 16 KB/400-line output caps, and human-only display details.
-- Default completions to queue mode, batch by origin within the byte budget, cap retained logs at 10 MB, and deduplicate delivery.
+- Default completions to automatic parent continuation, batch explicitly background results by origin within the byte budget, cap retained logs at 10 MB, and deduplicate delivery.
 - Bound fork context by complete message/tool groups within a 64 KB aggregate budget and preserve the newest assistant reply.
 - Sync parent runtime credentials and availability on resumes, and avoid requeueing completions the session already persisted.
 - Remove repeated scoped-model injection and shorten persistent tool guidance.

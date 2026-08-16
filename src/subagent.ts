@@ -20,7 +20,6 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import {
   type AssistantMessage,
   type Model,
-  StringEnum,
   type ThinkingLevel,
 } from "@earendil-works/pi-ai";
 import { Text } from "@earendil-works/pi-tui";
@@ -70,6 +69,13 @@ const ABORT_GRACE_MS = 5000;
 const MAX_FULL_OUTPUT_BYTES = 10 * 1024 * 1024;
 const MAX_LIST_ITEMS = 20;
 const MAX_STATUS_TEXT = 160;
+
+export function resolveCompletion(
+  requested: "queue" | "continue" | undefined,
+  background = false,
+): "queue" | "continue" {
+  return requested ?? (background ? "queue" : "continue");
+}
 
 function awaitWithoutCancelling<T>(
   promise: Promise<T>,
@@ -229,112 +235,43 @@ export function registerSubagentModule(
     name: "subagent",
     label: "Subagent",
     description:
-      "Run, inspect, steer, or stop durable background Pi sessions. Query models for the live session scope.",
-    promptSnippet: "Delegate durable background work to a subagent.",
+      "Delegate a self-contained task to a durable child Pi session. The child uses the parent model and tools, then reports its result automatically.",
+    promptSnippet: "Delegate a self-contained task to a subagent.",
     promptGuidelines: [
-      "Use subagent for multi-step or isolated work; finish your turn immediately after spawning (or do un-blocked independent work) and NEVER poll action:status or sleep.",
-      "Set completion: 'continue' when you need the subagent result to proceed — the framework automatically wakes the parent session when the subagent finishes.",
-      "Query subagent action:models before choosing an explicit model when the live session scope may have changed.",
-      "Use subagent context:fork only when parent history is needed; narrow tools when practical; use worktree:true for concurrent edits.",
+      "Use subagent for multi-step or isolated work. After spawning, continue useful independent work and never poll status or sleep.",
+      "The child result wakes the parent automatically. Use background:true only when the result should wait silently for a later turn.",
+      "The child inherits the parent model, thinking level, tools, and working directory. Use worktree:true for concurrent writers that need isolation.",
+      "Give each child a self-contained task with the expected result and relevant files; do not rely on the child seeing parent conversation history.",
     ],
     prepareArguments(args: unknown) {
+      // Legacy callers may still pass tool arrays; the public contract does
+      // not expose tool selection, but accepting the old shape is harmless.
       if (args && typeof args === "object" && !Array.isArray(args)) {
         const raw = args as Record<string, unknown>;
-        if (Array.isArray(raw.tools)) {
-          return {
-            ...raw,
-            tools: raw.tools.join(","),
-          };
-        }
+        if (Array.isArray(raw.tools))
+          return { ...raw, tools: raw.tools.join(",") };
       }
       return args as any;
     },
     parameters: Type.Object({
-      action: Type.Optional(
-        StringEnum(["spawn", "models", "status", "steer", "stop"] as const, {
-          description: "Action (default: spawn)",
-        }),
-      ),
-      prompt: Type.Optional(
-        Type.String({ description: "Task for spawn or resume" }),
-      ),
-      description: Type.Optional(
-        Type.String({ description: "Short job label" }),
-      ),
-      sessionId: Type.Optional(
-        Type.String({
-          description:
-            "Durable session identity to resume, inspect, steer, or stop",
-        }),
-      ),
-      message: Type.Optional(
-        Type.String({
-          description:
-            "Message queued after the running child's current turn (steer only)",
-        }),
-      ),
-      completion: Type.Optional(
-        StringEnum(["queue", "continue"] as const, {
-          description:
-            "queue stores the result without waking an idle parent; use 'continue' to automatically wake the parent session when finished",
-        }),
-      ),
-      modelOffset: Type.Optional(
-        Type.Number({
-          minimum: 0,
-          description: "Offset for action:models pagination",
-        }),
-      ),
-      model: Type.Optional(
-        Type.String({
-          description:
-            "Model override from the live scope; without a scope, any available model may be selected; omitted on new sessions inherits the parent and omitted on resume restores the saved model",
-        }),
-      ),
-      thinking: Type.Optional(
-        StringEnum(
-          ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const,
-          {
-            description:
-              "Thinking level; omitted on resume to restore the saved level",
-          },
-        ),
-      ),
-      tools: Type.Optional(
-        Type.String({
-          description:
-            "Comma-separated tool allowlist; can only narrow the parent's active tools",
-        }),
-      ),
-      cwd: Type.Optional(
-        Type.String({
-          description:
-            "Existing working directory; cannot be combined with worktree:true",
-        }),
-      ),
+      prompt: Type.String({ description: "Self-contained task for the child" }),
       worktree: Type.Optional(
         Type.Boolean({
           description:
-            "Create a unique persistent Git branch/worktree for a new session",
+            "Create an isolated Git worktree for the child; use for concurrent writers",
         }),
       ),
-      context: Type.Optional(
-        StringEnum(["project", "fork"] as const, {
+      background: Type.Optional(
+        Type.Boolean({
           description:
-            "project starts fresh with project resources (default); fork seeds sanitized parent conversation",
-        }),
-      ),
-      timeoutSec: Type.Optional(
-        Type.Number({
-          minimum: 1,
-          maximum: 2_147_483,
-          description: "Timeout in seconds (default: 600)",
+            "Keep the result queued without automatically waking the parent",
         }),
       ),
     }),
-    async execute(
-      _id,
-      {
+    async execute(_id, args: any, signal, _up, ctx) {
+      // Keep the old control payloads readable for durable sessions and direct
+      // callers, while exposing only the small spawn contract above to the LLM.
+      let {
         action = "spawn",
         prompt,
         description,
@@ -347,13 +284,10 @@ export function registerSubagentModule(
         tools,
         cwd,
         worktree = false,
+        background = false,
         context = "project",
         timeoutSec = 600,
-      },
-      signal,
-      _up,
-      ctx,
-    ) {
+      } = args;
       manager.currentCtx = ctx;
       const originLeafId = ctx.sessionManager.getLeafId();
       const configuredScope = [...getScopedModels(ctx)];
@@ -1123,7 +1057,9 @@ export function registerSubagentModule(
         };
       }
       if (!prompt?.trim()) throw new Error("prompt is required for spawn");
-      completion ??= "queue";
+      // Normal delegation wakes the parent when the child finishes. The
+      // explicit background escape hatch keeps the result queued silently.
+      completion = resolveCompletion(completion, background);
       const expectedGeneration = manager.generation;
       manager.guard(expectedGeneration);
       const setupController = new AbortController();
@@ -1863,58 +1799,17 @@ export function registerSubagentModule(
         },
       };
     },
-    renderCall(args, theme) {
-      const safe = (value: unknown) =>
-        sanitizeTerminalOutput(String(value ?? ""));
-      const action = args.action ?? "spawn";
-      if (action === "models")
-        return new Text(
-          theme.fg("toolTitle", theme.bold("Query subagent models")),
-          0,
-          0,
-        );
-      if (action === "status")
-        return new Text(
-          theme.fg(
-            "toolTitle",
-            theme.bold(
-              `Subagent status${args.sessionId ? `: ${safe(args.sessionId)}` : ""}`,
-            ),
-          ),
-          0,
-          0,
-        );
-      if (action === "stop")
-        return new Text(
-          theme.fg(
-            "toolTitle",
-            theme.bold(`Stop subagent ${safe(args.sessionId)}`),
-          ),
-          0,
-          0,
-        );
-      if (action === "steer")
-        return new Text(
-          theme.fg(
-            "toolTitle",
-            theme.bold(
-              `Steer subagent ${safe(args.sessionId)}: ${safe(args.message)}`,
-            ),
-          ),
-          0,
-          0,
-        );
-
-      const label = sanitizeTerminalOutput(
-        String(args.description || args.prompt || "..."),
-      );
-      const shortLabel = label.length > 30 ? `${label.slice(0, 30)}...` : label;
-      const modelTag = args.model
-        ? ` [${safe(args.model)}${args.thinking ? `:${safe(args.thinking)}` : ""}]`
-        : "";
-      const completionTag = args.completion === "queue" ? " [queue]" : "";
+    renderCall(args: any, theme) {
+      const label = sanitizeTerminalOutput(String(args.prompt || "..."));
+      const shortLabel = label.length > 60 ? `${label.slice(0, 60)}...` : label;
+      const tags = [
+        args.worktree ? "worktree" : "",
+        args.background ? "background" : "",
+      ]
+        .filter(Boolean)
+        .join(", ");
       return new Text(
-        `${theme.fg("toolTitle", theme.bold(`Subagent: ${shortLabel}`))}${theme.fg("dim", modelTag + completionTag)}`,
+        `${theme.fg("toolTitle", theme.bold(`Subagent: ${shortLabel}`))}${tags ? theme.fg("dim", ` [${tags}]`) : ""}`,
         0,
         0,
       );

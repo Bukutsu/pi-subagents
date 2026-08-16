@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   registerSubagentModule,
+  resolveCompletion,
   shouldForwardApiKey,
 } from "../src/subagent.js";
 
@@ -39,6 +40,11 @@ test("registers the subagent tool and slash command", async () => {
   const subagent = tools.find((tool) => tool.name === "subagent");
   assert.ok(subagent);
   assert.ok(commands.some((command) => command.name === "subagent"));
+  assert.deepEqual(Object.keys(subagent.parameters.properties), [
+    "prompt",
+    "worktree",
+    "background",
+  ]);
 
   const ctx: any = {
     cwd: process.cwd(),
@@ -114,6 +120,13 @@ test("queries the live session model scope", async () => {
     JSON.parse(second.content[0].text).models[0].model,
     "provider/two",
   );
+});
+
+test("defaults completion to parent continuation unless background is explicit", () => {
+  assert.equal(resolveCompletion(undefined), "continue");
+  assert.equal(resolveCompletion(undefined, true), "queue");
+  assert.equal(resolveCompletion("queue"), "queue");
+  assert.equal(resolveCompletion("continue", true), "continue");
 });
 
 test("steer preserves completion mode when omitted", async () => {
