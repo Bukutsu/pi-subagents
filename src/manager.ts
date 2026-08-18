@@ -123,7 +123,7 @@ export class SubagentManager {
   public generation = 0;
   public shuttingDown = true;
   public lifecycle = new AbortController();
-  public pending = new Set<Promise<void>>();
+  public pending = new Set<Promise<unknown>>();
   private deliveredCompletionIds = new Set<string>();
   private inFlightCompletionIds = new Set<string>();
   public handoffDir = HANDOFF_DIR;
@@ -212,22 +212,36 @@ export class SubagentManager {
       this.lifecycle = new AbortController();
       this.deliveredCompletionIds.clear();
       this.inFlightCompletionIds.clear();
+      const currentFile = ctx.sessionManager.getSessionFile() ?? "";
+      const currentId = ctx.sessionManager.getSessionId();
       for (const job of this.jobs.values()) {
-        job.expectedGeneration = this.generation;
-        job.originSessionFile = ctx.sessionManager.getSessionFile() ?? "";
-        job.originSessionId = ctx.sessionManager.getSessionId();
-        job.handedOff = false;
-        if (job.activity === "finishing (session reload)") {
-          job.activity = undefined;
-        }
-        if (job.completionId) {
-          const path = join(this.handoffDir, `${job.completionId}.json`);
-          if (existsSync(path)) {
-            try {
-              rmSync(path, { force: true });
-            } catch {}
+        const isCurrentSession =
+          !job.originSessionId ||
+          !currentId ||
+          job.originSessionId === currentId ||
+          (job.originSessionFile &&
+            currentFile &&
+            job.originSessionFile === currentFile);
+        if (isCurrentSession) {
+          job.expectedGeneration = this.generation;
+          if (currentFile) job.originSessionFile = currentFile;
+          if (currentId) job.originSessionId = currentId;
+          job.handedOff = false;
+          if (job.activity === "finishing (session reload)") {
+            job.activity = undefined;
+          }
+          if (job.completionId) {
+            const path = join(this.handoffDir, `${job.completionId}.json`);
+            if (existsSync(path)) {
+              try {
+                rmSync(path, { force: true });
+              } catch {}
+            }
           }
         }
+      }
+      for (const item of this.pendingCompletions) {
+        item.expectedGeneration = this.generation;
       }
       this.drainHandoffs(ctx);
       this.flushPendingCompletions(ctx);
@@ -341,7 +355,9 @@ export class SubagentManager {
 
     const activeJobs = Array.from(this.jobs.values());
     if (activeJobs.length === 0) {
-      active.ui.setWidget("pi-subagents", undefined);
+      try {
+        active.ui.setWidget("pi-subagents", undefined);
+      } catch {}
       if (this.widgetTimer) {
         clearInterval(this.widgetTimer);
         this.widgetTimer = undefined;
@@ -349,93 +365,99 @@ export class SubagentManager {
       return;
     }
 
-    active.ui.setWidget(
-      "pi-subagents",
-      (_tui, theme) => {
-        const frame =
-          BRAILLE[Math.floor(Date.now() / WIDGET_REFRESH_MS) % BRAILLE.length];
-        const bColor = (str: string) => theme.fg("dim", str);
-        return {
-          render(width: number) {
-            const count = activeJobs.length;
-            const innerWidth = Math.max(10, width - 2);
-            const title = ` Subagents (${count}) `;
-            const topFillLen = Math.max(0, innerWidth - visibleWidth(title));
-            const top = truncateToWidth(
-              bColor("╭") +
-                theme.fg("accent", theme.bold(title)) +
-                bColor("─".repeat(topFillLen)) +
-                bColor("╮"),
-              width,
-            );
+    try {
+      active.ui.setWidget(
+        "pi-subagents",
+        (_tui, theme) => {
+          const frame =
+            BRAILLE[
+              Math.floor(Date.now() / WIDGET_REFRESH_MS) % BRAILLE.length
+            ];
+          const bColor = (str: string) => theme.fg("dim", str);
+          return {
+            render(width: number) {
+              const count = activeJobs.length;
+              const innerWidth = Math.max(10, width - 2);
+              const title = ` Subagents (${count}) `;
+              const topFillLen = Math.max(0, innerWidth - visibleWidth(title));
+              const top = truncateToWidth(
+                bColor("╭") +
+                  theme.fg("accent", theme.bold(title)) +
+                  bColor("─".repeat(topFillLen)) +
+                  bColor("╮"),
+                width,
+              );
 
-            const maxVisible = 3;
-            const overflow = count > maxVisible;
-            const visibleJobs = activeJobs.slice(0, overflow ? 2 : 3);
+              const maxVisible = 3;
+              const overflow = count > maxVisible;
+              const visibleJobs = activeJobs.slice(0, overflow ? 2 : 3);
 
-            const jobLines = visibleJobs.map((job) => {
-              const elapsed = Math.round((Date.now() - job.startedAt) / 1000);
-              const stopping = job.stopping === true;
-              const icon = theme.fg(
-                stopping ? "warning" : "success",
-                stopping ? "◐" : "●",
-              );
-              const progress = job.activity
-                ? `, ${truncateToWidth(sanitizeTerminalOutput(job.activity), 24)}`
-                : "";
-              const badgeText = job.session.model
-                ? sanitizeTerminalOutput(
-                    `${job.session.model.id}:${job.session.thinkingLevel}`,
-                  )
-                : sanitizeTerminalOutput(job.record.model);
-              const queueTag = job.completion === "queue" ? " Q" : "";
-              const badge = ` [${badgeText}${queueTag}]`;
-              const prefix = ` ${icon} `;
-              const state = stopping ? "stopping" : "running";
-              const meta = `${badge} ${theme.fg("dim", `(${state}, ${elapsed}s${progress})`)}`;
-              const availForCmd = Math.max(
-                0,
-                innerWidth - visibleWidth(prefix) - visibleWidth(meta),
-              );
-              const command = sanitizeTerminalOutput(job.command);
-              const truncatedCmd =
-                visibleWidth(command) > availForCmd
-                  ? truncateToWidth(command, availForCmd)
-                  : command;
-              const content = `${prefix}${truncatedCmd}${meta}`;
-              const fill = " ".repeat(
-                Math.max(0, innerWidth - visibleWidth(content)),
-              );
-              return (
-                bColor("│") +
-                truncateToWidth(content + fill, innerWidth) +
-                bColor("│")
-              );
-            });
-
-            if (overflow) {
-              const hidden = count - 2;
-              const content = ` ${theme.fg("accent", frame)} ${theme.fg("dim", `+${hidden} more running...`)}`;
-              const fill = " ".repeat(
-                Math.max(0, innerWidth - visibleWidth(content)),
-              );
-              jobLines.push(
-                bColor("│") +
+              const jobLines = visibleJobs.map((job) => {
+                const elapsed = Math.round((Date.now() - job.startedAt) / 1000);
+                const stopping = job.stopping === true;
+                const icon = theme.fg(
+                  stopping ? "warning" : "success",
+                  stopping ? "◐" : "●",
+                );
+                const progress = job.activity
+                  ? `, ${truncateToWidth(sanitizeTerminalOutput(job.activity), 24)}`
+                  : "";
+                const badgeText = job.session.model
+                  ? sanitizeTerminalOutput(
+                      `${job.session.model.id}:${job.session.thinkingLevel}`,
+                    )
+                  : sanitizeTerminalOutput(job.record.model);
+                const queueTag = job.completion === "queue" ? " Q" : "";
+                const badge = ` [${badgeText}${queueTag}]`;
+                const prefix = ` ${icon} `;
+                const state = stopping ? "stopping" : "running";
+                const meta = `${badge} ${theme.fg("dim", `(${state}, ${elapsed}s${progress})`)}`;
+                const availForCmd = Math.max(
+                  0,
+                  innerWidth - visibleWidth(prefix) - visibleWidth(meta),
+                );
+                const command = sanitizeTerminalOutput(job.command);
+                const truncatedCmd =
+                  visibleWidth(command) > availForCmd
+                    ? truncateToWidth(command, availForCmd)
+                    : command;
+                const content = `${prefix}${truncatedCmd}${meta}`;
+                const fill = " ".repeat(
+                  Math.max(0, innerWidth - visibleWidth(content)),
+                );
+                return (
+                  bColor("│") +
                   truncateToWidth(content + fill, innerWidth) +
-                  bColor("│"),
-              );
-            }
+                  bColor("│")
+                );
+              });
 
-            const bottom = bColor("╰" + "─".repeat(innerWidth) + "╯");
-            return [top, ...jobLines, bottom].map((line) =>
-              truncateToWidth(line, width),
-            );
-          },
-          invalidate() {},
-        };
-      },
-      { placement: "aboveEditor" },
-    );
+              if (overflow) {
+                const hidden = count - 2;
+                const content = ` ${theme.fg("accent", frame)} ${theme.fg("dim", `+${hidden} more running...`)}`;
+                const fill = " ".repeat(
+                  Math.max(0, innerWidth - visibleWidth(content)),
+                );
+                jobLines.push(
+                  bColor("│") +
+                    truncateToWidth(content + fill, innerWidth) +
+                    bColor("│"),
+                );
+              }
+
+              const bottom = bColor("╰" + "─".repeat(innerWidth) + "╯");
+              return [top, ...jobLines, bottom].map((line) =>
+                truncateToWidth(line, width),
+              );
+            },
+            invalidate() {},
+          };
+        },
+        { placement: "aboveEditor" },
+      );
+    } catch {
+      // Ignored if active context is stale or being replaced
+    }
 
     if (!this.widgetTimer) {
       this.widgetTimer = setInterval(
@@ -491,8 +513,10 @@ export class SubagentManager {
     ensurePrivateDir(this.handoffDir);
   }
 
-  private handoffActiveJobs(ctx: ExtensionContext) {
+  private handoffActiveJobs(ctx?: ExtensionContext) {
     this.ensureHandoffDir();
+    const currentFile = ctx?.sessionManager?.getSessionFile?.() ?? "";
+    const currentId = ctx?.sessionManager?.getSessionId?.() ?? "";
     for (const job of this.jobs.values()) {
       if (!job.completionId) {
         job.controller.abort();
@@ -502,8 +526,8 @@ export class SubagentManager {
         v: 1,
         pid: job.pid,
         sessionId: job.sessionId,
-        sessionFile: job.originSessionFile,
-        parentSessionId: job.originSessionId,
+        sessionFile: job.originSessionFile || currentFile,
+        parentSessionId: job.originSessionId || currentId,
         originLeafId: job.originLeafId,
         startedAt: job.startedAt,
         completion: job.completion ?? "queue",
@@ -518,6 +542,37 @@ export class SubagentManager {
         );
       } catch (error) {
         console.warn("Could not persist handoff entry:", error);
+      }
+    }
+    for (const item of this.pendingCompletions) {
+      if (!item.completionId) continue;
+      const entry: HandoffEntry = {
+        v: 1,
+        pid: 0,
+        sessionFile: currentFile,
+        parentSessionId: currentId,
+        originLeafId: item.originLeafId,
+        startedAt: Date.now(),
+        completion: item.completion,
+        completionId: item.completionId,
+        expectedGeneration: item.expectedGeneration,
+        result: {
+          message: item.message,
+          displayMessage: item.displayMessage,
+          details: item.details,
+          triggerTurn: item.triggerTurn,
+        },
+      };
+      try {
+        atomicWriteFileSync(
+          join(this.handoffDir, `${item.completionId}.json`),
+          JSON.stringify(entry, null, 2),
+        );
+      } catch (error) {
+        console.warn(
+          "Could not persist pending completion handoff entry:",
+          error,
+        );
       }
     }
   }
@@ -872,9 +927,10 @@ export class SubagentManager {
       throw new Error("Parent session ended during subagent setup");
   }
 
-  public track(done: Promise<void>) {
-    this.pending.add(done);
-    void done.finally(() => this.pending.delete(done)).catch(() => {});
+  public track<T>(done: Promise<T>): Promise<T> {
+    const untyped = done as Promise<unknown>;
+    this.pending.add(untyped);
+    void done.finally(() => this.pending.delete(untyped)).catch(() => {});
     return done;
   }
 
@@ -888,6 +944,22 @@ export class SubagentManager {
     displayMessage?: string,
     details?: unknown,
   ) {
+    if (this.shuttingDown) {
+      if (completionId) {
+        this.ensureHandoffDir();
+        const handoffPath = join(this.handoffDir, `${completionId}.json`);
+        if (existsSync(handoffPath)) {
+          this.writeHandoffResult(handoffPath, {
+            message,
+            displayMessage,
+            details,
+            triggerTurn,
+          });
+        }
+      }
+      return;
+    }
+
     if (completionId) {
       const handoffPath = this.handoffPathFor(completionId);
       if (handoffPath) {
@@ -902,7 +974,21 @@ export class SubagentManager {
         } catch {}
       }
     }
-    if (this.shuttingDown || this.generation !== expectedGeneration) return;
+    if (this.generation !== expectedGeneration) {
+      if (completionId) {
+        const handoffPath = join(this.handoffDir, `${completionId}.json`);
+        if (existsSync(handoffPath)) {
+          this.writeHandoffResult(handoffPath, {
+            message,
+            displayMessage,
+            details,
+            triggerTurn,
+          });
+          return;
+        }
+      }
+      return;
+    }
     if (
       completionId &&
       (this.deliveredCompletionIds.has(completionId) ||

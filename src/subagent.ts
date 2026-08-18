@@ -1507,7 +1507,7 @@ export function registerSubagentModule(
               pendingActivity = undefined;
               if (next && job.activity !== next) {
                 job.activity = next;
-                manager.syncStatus(ctx);
+                manager.syncStatus();
               }
             }, TOOL_ACTIVITY_HOLD_MS);
             activityTimer.unref?.();
@@ -1521,7 +1521,7 @@ export function registerSubagentModule(
         }
         if (job.activity === activity) return;
         job.activity = activity;
-        manager.syncStatus(ctx);
+        manager.syncStatus();
         manager.pi.events?.emit("subagent:progress", {
           pid: job.pid,
           sessionId: job.sessionId,
@@ -1658,10 +1658,12 @@ export function registerSubagentModule(
             durationSec: Math.round((Date.now() - job.startedAt) / 1000),
             updatedAt: new Date().toISOString(),
           } as const;
+          const currentExpectedGen =
+            job?.expectedGeneration ?? expectedGeneration;
           const handoffPath = manager.handoffPathFor(completionId);
           if (
             !manager.shuttingDown &&
-            manager.generation === expectedGeneration
+            (manager.generation === currentExpectedGen || manager.jobs.has(pid))
           ) {
             try {
               job.record = {
@@ -1747,7 +1749,7 @@ export function registerSubagentModule(
             toolFailures: completedRecord.toolFailures,
           };
           if (background) {
-            if (handoffPath) {
+            if (handoffPath && manager.generation !== currentExpectedGen) {
               // The old runtime cannot deliver through the stale extension
               // context; persist the result for the origin session's next
               // runtime.
@@ -1761,7 +1763,7 @@ export function registerSubagentModule(
               manager.deliverCompletion(
                 compact,
                 job.stoppedManually ? "queue" : (job.completion ?? "queue"),
-                expectedGeneration,
+                currentExpectedGen,
                 originLeafId,
                 !job.stoppedManually,
                 completionId,
@@ -1769,7 +1771,7 @@ export function registerSubagentModule(
                 completionDetails,
               );
             }
-          } else if (handoffPath) {
+          } else if (handoffPath && manager.generation !== currentExpectedGen) {
             manager.writeHandoffResult(handoffPath, {
               message: compact,
               displayMessage: display,
@@ -1795,7 +1797,7 @@ export function registerSubagentModule(
             );
           } finally {
             manager.jobs.delete(pid);
-            manager.syncStatus(ctx);
+            manager.syncStatus();
           }
         }
       })();

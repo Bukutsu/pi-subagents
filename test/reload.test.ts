@@ -167,3 +167,210 @@ test("cross-process file handoff restores and delivers completion", async () => 
     rmSync(handoffDir, { recursive: true, force: true });
   }
 });
+
+test("in-process reload delivers completion when job finishes after reload", async () => {
+  const handoffDir = mkdtempSync(join(tmpdir(), "pi-sub-handoff-"));
+  try {
+    const { pi: oldPi, handlers: oldHandlers } = createFakePi();
+    const oldManager = new SubagentManager(oldPi as any);
+    oldManager.handoffDir = handoffDir;
+    oldManager.init();
+    await oldHandlers.get("session_start")!(undefined, createCtx());
+
+    const childController = new AbortController();
+    const job = {
+      pid: 300,
+      command: "Subagent: round 2 audit",
+      startedAt: Date.now(),
+      sessionId: "session-300",
+      controller: childController,
+      completionId: "completion-300",
+      forceCleanup: () => {},
+      session: {
+        getSessionStats: () => ({ assistantMessages: 1, toolCalls: 2 }),
+      },
+      activity: "thinking",
+      baseline: { assistantMessages: 0, toolCalls: 0 },
+      record: { sessionId: "session-300", cwd: process.cwd(), model: "test" },
+      toolFailures: 0,
+      completion: "continue",
+      originLeafId: "leaf-1",
+      expectedGeneration: oldManager.generation,
+      originSessionFile: "session-300.jsonl",
+      originSessionId: "reload-session",
+    } as any;
+    oldManager.jobs.set(300, job);
+
+    // Simulate session reload
+    await oldHandlers.get("session_shutdown")!(
+      { reason: "reload" },
+      createCtx("session-300.jsonl"),
+    );
+
+    const { pi: newPi, handlers: newHandlers, messages } = createFakePi();
+    const newManager = new SubagentManager(newPi as any);
+    newManager.handoffDir = handoffDir;
+    newManager.init();
+    await newHandlers.get("session_start")!(
+      { reason: "reload" },
+      createCtx("session-300.jsonl"),
+    );
+
+    assert.equal(job.expectedGeneration, newManager.generation);
+
+    // Job finishes after reload and delivers using its updated expectedGeneration
+    newManager.deliverCompletion(
+      '{"v":1,"type":"subagent","event":"complete","state":"finished","sessionId":"session-300"}',
+      "continue",
+      job.expectedGeneration,
+      "leaf-1",
+      true,
+      "completion-300",
+      "Audit finished",
+      { sessionId: "session-300" },
+    );
+
+    assert.equal(messages.length, 1);
+    assert.equal(messages[0].customType, "pi-subagent-result");
+
+    newManager.jobs.delete(300);
+  } finally {
+    rmSync(handoffDir, { recursive: true, force: true });
+  }
+});
+
+test("syncStatus gracefully ignores stale context errors during reload", () => {
+  const { pi } = createFakePi();
+  const manager = new SubagentManager(pi as any);
+  manager.shuttingDown = false;
+
+  const staleCtx: any = {
+    get ui() {
+      throw new Error(
+        "This extension ctx is stale after session replacement or reload.",
+      );
+    },
+  };
+
+  // Calling syncStatus with a throwing/stale context must not throw
+  assert.doesNotThrow(() => {
+    manager.syncStatus(staleCtx);
+  });
+});
+
+test("pending completions queued before reload are flushed to reloaded session", async () => {
+  const handoffDir = mkdtempSync(join(tmpdir(), "pi-sub-handoff-"));
+  try {
+    const { pi: oldPi, handlers: oldHandlers } = createFakePi();
+    const oldManager = new SubagentManager(oldPi as any);
+    oldManager.handoffDir = handoffDir;
+    oldManager.init();
+    let idle = false;
+    const ctx = {
+      ...createCtx("session-queue.jsonl"),
+      isIdle: () => idle,
+    };
+    await oldHandlers.get("session_start")!(undefined, ctx);
+
+    // Queue a completion while parent is busy before reload
+    oldManager.deliverCompletion(
+      '{"v":1,"type":"subagent","event":"complete","state":"finished","sessionId":"session-queued"}',
+      "continue",
+      oldManager.generation,
+      "leaf-1",
+      false, // triggerTurn false + idle false -> will queue
+      "completion-queued-1",
+    );
+
+    // Reload
+    await oldHandlers.get("session_shutdown")!({ reason: "reload" }, ctx);
+
+    const { pi: newPi, handlers: newHandlers, messages } = createFakePi();
+    const newManager = new SubagentManager(newPi as any);
+    newManager.handoffDir = handoffDir;
+    newManager.init();
+    idle = true; // now idle in reloaded session
+    await newHandlers.get("session_start")!({ reason: "reload" }, ctx);
+
+    assert.equal(messages.length, 1);
+    assert.equal(messages[0].customType, "pi-subagent-result");
+  } finally {
+    rmSync(handoffDir, { recursive: true, force: true });
+  }
+});
+
+test("session switch does not clobber other session jobs or handoffs", async () => {
+  const handoffDir = mkdtempSync(join(tmpdir(), "pi-sub-handoff-"));
+  try {
+    const { pi: oldPi, handlers: oldHandlers } = createFakePi();
+    const oldManager = new SubagentManager(oldPi as any);
+    oldManager.handoffDir = handoffDir;
+    oldManager.init();
+    const ctxSessionA = {
+      ...createCtx("session-A.jsonl"),
+      sessionManager: {
+        getLeafId: () => "leaf-A",
+        getBranch: () => [{ id: "leaf-A" }],
+        getEntries: () => [],
+        getSessionId: () => "session-A-id",
+        getSessionFile: () => "session-A.jsonl",
+      },
+    };
+    await oldHandlers.get("session_start")!(undefined, ctxSessionA);
+
+    const jobA = {
+      pid: 400,
+      command: "Subagent: session A job",
+      startedAt: Date.now(),
+      sessionId: "session-A-sub",
+      controller: new AbortController(),
+      completionId: "completion-session-A",
+      forceCleanup: () => {},
+      session: {
+        getSessionStats: () => ({ assistantMessages: 1, toolCalls: 1 }),
+      },
+      activity: "thinking",
+      baseline: { assistantMessages: 0, toolCalls: 0 },
+      record: { sessionId: "session-A-sub", cwd: process.cwd(), model: "test" },
+      toolFailures: 0,
+      completion: "continue",
+      originLeafId: "leaf-A",
+      expectedGeneration: oldManager.generation,
+      originSessionFile: "session-A.jsonl",
+      originSessionId: "session-A-id",
+    } as any;
+    oldManager.jobs.set(400, jobA);
+
+    // Switch to session B
+    await oldHandlers.get("session_shutdown")!(
+      { reason: "resume" },
+      ctxSessionA,
+    );
+
+    const { pi: newPi, handlers: newHandlers, messages } = createFakePi();
+    const newManager = new SubagentManager(newPi as any);
+    newManager.handoffDir = handoffDir;
+    newManager.init();
+    const ctxSessionB = {
+      ...createCtx("session-B.jsonl"),
+      sessionManager: {
+        getLeafId: () => "leaf-B",
+        getBranch: () => [{ id: "leaf-B" }],
+        getEntries: () => [],
+        getSessionId: () => "session-B-id",
+        getSessionFile: () => "session-B.jsonl",
+      },
+    };
+    await newHandlers.get("session_start")!({ reason: "resume" }, ctxSessionB);
+
+    // Job A should retain its originSessionId/File and not deliver to Session B
+    assert.equal(jobA.originSessionId, "session-A-id");
+    assert.equal(jobA.originSessionFile, "session-A.jsonl");
+    assert.equal(messages.length, 0, "must not deliver to Session B");
+
+    // Clean up
+    newManager.jobs.delete(400);
+  } finally {
+    rmSync(handoffDir, { recursive: true, force: true });
+  }
+});
