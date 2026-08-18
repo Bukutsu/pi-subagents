@@ -1,9 +1,11 @@
 import assert from "node:assert/strict";
+import { afterEach } from "node:test";
 import test from "node:test";
-import { mkdtempSync, rmSync } from "node:fs";
+import { rmSync } from "node:fs";
 import { join } from "node:path";
-import { tmpdir } from "node:os";
 import { SubagentManager } from "../src/manager.js";
+import { SUBAGENT_INDEX } from "../src/types.js";
+import type { SubagentRecord } from "../src/types.js";
 
 function createFakePi() {
   const handlers = new Map<string, (event: any, ctx: any) => Promise<void>>();
@@ -24,6 +26,47 @@ function createFakePi() {
 /** Clear the global jobs map to prevent cross-test pollution. */
 function clearGlobalJobs() {
   (globalThis as any).__PI_SUBAGENTS_ACTIVE_JOBS__?.clear();
+}
+
+const TEST_SESSION_IDS = [
+  "session-abc",
+  "session-quit",
+  "session-block",
+  "session-A-sub",
+];
+
+afterEach(() => {
+  for (const sessionId of TEST_SESSION_IDS) {
+    rmSync(join(SUBAGENT_INDEX, `${sessionId}.json`), { force: true });
+  }
+});
+
+function createTestRecord(sessionId: string): SubagentRecord {
+  const now = new Date().toISOString();
+  return {
+    sessionId,
+    cwd: process.cwd(),
+    sessionFile: "",
+    model: "test",
+    label: "test",
+    createdAt: now,
+    updatedAt: now,
+    state: "running",
+    turns: 0,
+    toolCount: 0,
+    toolFailures: 0,
+    usage: {
+      input: 0,
+      output: 0,
+      cacheRead: 0,
+      cacheWrite: 0,
+      total: 0,
+      cost: 0,
+    },
+    inheritedTools: [],
+    context: "project",
+    ownerPid: process.pid,
+  };
 }
 
 function createCtx(sessionFile: string | undefined = undefined) {
@@ -64,7 +107,7 @@ test("reload preserves live in-process subagent job across extension reload", as
     },
     activity: "thinking",
     baseline: { assistantMessages: 0, toolCalls: 0 },
-    record: { sessionId: "session-abc", cwd: process.cwd(), model: "test" },
+    record: createTestRecord("session-abc"),
     toolFailures: 0,
     completion: "queue",
     originLeafId: "leaf-1",
@@ -106,7 +149,7 @@ test("quit cleans up all jobs", async () => {
     },
     activity: "thinking",
     baseline: { assistantMessages: 0, toolCalls: 0 },
-    record: { sessionId: "session-quit", cwd: process.cwd(), model: "test" },
+    record: createTestRecord("session-quit"),
     toolFailures: 0,
     completion: "queue",
     originLeafId: "leaf-1",
@@ -145,7 +188,7 @@ test("session switch is blocked when subagents are running", async () => {
     },
     activity: "thinking",
     baseline: { assistantMessages: 0, toolCalls: 0 },
-    record: { sessionId: "session-block", cwd: process.cwd(), model: "test" },
+    record: createTestRecord("session-block"),
     toolFailures: 0,
     completion: "queue",
     originLeafId: "leaf-1",
@@ -258,11 +301,7 @@ test("session switch does not clobber other session jobs", async () => {
     },
     activity: "thinking",
     baseline: { assistantMessages: 0, toolCalls: 0 },
-    record: {
-      sessionId: "session-A-sub",
-      cwd: process.cwd(),
-      model: "test",
-    },
+    record: createTestRecord("session-A-sub"),
     toolFailures: 0,
     completion: "continue",
     originLeafId: "leaf-A",
