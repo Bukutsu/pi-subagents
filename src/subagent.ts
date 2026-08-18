@@ -1035,10 +1035,6 @@ export function registerSubagentModule(
           throw new Error(
             `Running subagent not found: ${requestedId || "missing sessionId"}`,
           );
-        if (matching.handedOff)
-          throw new Error(
-            `Subagent ${matching.sessionId} is finishing after a session reload; steer it after its result arrives`,
-          );
         if (!message?.trim()) throw new Error("message is required for steer");
         // session.steer() only queues while the agent is streaming; reject
         // instead of silently losing guidance to a completion race.
@@ -1658,13 +1654,7 @@ export function registerSubagentModule(
             durationSec: Math.round((Date.now() - job.startedAt) / 1000),
             updatedAt: new Date().toISOString(),
           } as const;
-          const currentExpectedGen =
-            job?.expectedGeneration ?? expectedGeneration;
-          const handoffPath = manager.handoffPathFor(completionId);
-          if (
-            !manager.shuttingDown &&
-            (manager.generation === currentExpectedGen || manager.jobs.has(pid))
-          ) {
+          if (!manager.shuttingDown && manager.jobs.has(pid)) {
             try {
               job.record = {
                 ...manager.currentRecord(job),
@@ -1682,18 +1672,6 @@ export function registerSubagentModule(
             }
           } else {
             job.record = { ...job.record!, ...terminalFields };
-            if (handoffPath) {
-              // Session replaced: persist the terminal record so the next
-              // runtime sees a finished child instead of a stale "running".
-              try {
-                saveRecord(job.record);
-              } catch (recordError) {
-                console.warn(
-                  `Could not save final subagent state:`,
-                  recordError,
-                );
-              }
-            }
           }
           const completedRecord = job.record!;
           const usage = completedRecord.usage;
@@ -1749,35 +1727,16 @@ export function registerSubagentModule(
             toolFailures: completedRecord.toolFailures,
           };
           if (background) {
-            if (handoffPath && manager.generation !== currentExpectedGen) {
-              // The old runtime cannot deliver through the stale extension
-              // context; persist the result for the origin session's next
-              // runtime.
-              manager.writeHandoffResult(handoffPath, {
-                message: compact,
-                displayMessage: display,
-                details: completionDetails,
-                triggerTurn: !job.stoppedManually,
-              });
-            } else {
-              manager.deliverCompletion(
-                compact,
-                job.stoppedManually ? "queue" : (job.completion ?? "queue"),
-                currentExpectedGen,
-                originLeafId,
-                !job.stoppedManually,
-                completionId,
-                display,
-                completionDetails,
-              );
-            }
-          } else if (handoffPath && manager.generation !== currentExpectedGen) {
-            manager.writeHandoffResult(handoffPath, {
-              message: compact,
-              displayMessage: display,
-              details: completionDetails,
-              triggerTurn: true,
-            });
+            manager.deliverCompletion(
+              compact,
+              job.stoppedManually ? "queue" : (job.completion ?? "queue"),
+              expectedGeneration,
+              originLeafId,
+              !job.stoppedManually,
+              completionId,
+              display,
+              completionDetails,
+            );
           }
           return {
             compact,

@@ -2,9 +2,10 @@
 
 ## Unreleased
 
-- Fix in-process reload completion delivery and prevent stale extension context exceptions from crashing child subagents during session reload.
-- Preserve queued and in-flight subagent completions across session reload and session switches without dropping results due to generation bumps.
-- Protect TUI widget status sync against stale context errors during session transition.
+- Block session switches, forks, and tree navigation when subagents are running to prevent stale extension context crashes.
+- Remove session handoff code (`handoffDir`, `drainHandoffs`, `handoffActiveJobs`, `writeHandoffResult`, `startHandoffWatcher`) — no longer needed since session replacement is blocked.
+- Simplify `session_shutdown` to only handle `quit` reason.
+- Protect TUI widget status sync against stale context errors.
 
 - Execute subagent tasks synchronously by default, returning completed results directly in tool responses to eliminate polling sleep loops and align with multi-tool parallel execution; use `background: true` for asynchronous execution.
 - Bundle `multi-agent-worktree` skill providing practical guidance on parallel editing, environment replication, port isolation, baseline test verification, and clean git branch integration.

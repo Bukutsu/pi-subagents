@@ -18,7 +18,6 @@ import {
 } from "node:fs";
 import { join } from "node:path";
 import {
-  HANDOFF_DIR,
   SUBAGENT_DIR,
   SUBAGENT_SESSION_DIR,
   type SubagentJob,
@@ -37,47 +36,6 @@ function getGlobalActiveJobs(): Map<number, SubagentJob> {
   >());
 }
 
-export interface HandoffEntry {
-  v: 1;
-  pid: number;
-  sessionId?: string;
-  sessionFile: string;
-  parentSessionId?: string;
-  originLeafId: string | null;
-  startedAt: number;
-  completion: "queue" | "continue";
-  completionId: string;
-  expectedGeneration: number;
-  command?: string;
-  result?: {
-    message: string;
-    displayMessage?: string;
-    details?: unknown;
-    triggerTurn: boolean;
-  };
-}
-
-const HANDED_OFF_SESSION: SubagentJobSession = {
-  model: undefined,
-  thinkingLevel: undefined,
-  getSessionStats: () => ({
-    sessionId: "",
-    sessionFile: "",
-    userMessages: 0,
-    assistantMessages: 0,
-    toolCalls: 0,
-    toolResults: 0,
-    totalMessages: 0,
-    tokens: {
-      input: 0,
-      output: 0,
-      cacheRead: 0,
-      cacheWrite: 0,
-      total: 0,
-    },
-    cost: 0,
-  }),
-};
 import {
   atomicWriteFileSync,
   createMarkdownComponent,
@@ -90,20 +48,6 @@ import {
   saveRecord,
   usageSince,
 } from "./utils.js";
-
-const GLOBAL_EXIT_HANDLER_KEY = Symbol.for("pi-subagents.exit-handler");
-function ensureGlobalExitHandler() {
-  if ((globalThis as any)[GLOBAL_EXIT_HANDLER_KEY]) return;
-  (globalThis as any)[GLOBAL_EXIT_HANDLER_KEY] = true;
-  process.on("exit", () => {
-    const jobs = getGlobalActiveJobs();
-    for (const job of jobs.values()) {
-      try {
-        job.controller.abort();
-      } catch {}
-    }
-  });
-}
 
 const BRAILLE = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 const WIDGET_REFRESH_MS = 200;
@@ -126,8 +70,6 @@ export class SubagentManager {
   public pending = new Set<Promise<unknown>>();
   private deliveredCompletionIds = new Set<string>();
   private inFlightCompletionIds = new Set<string>();
-  public handoffDir = HANDOFF_DIR;
-  private handoffWatcher: ReturnType<typeof setInterval> | undefined;
   private pendingSetups = new Set<AbortController>();
   private widgetTimer: ReturnType<typeof setInterval> | undefined;
   private pendingCompletions: Array<{
@@ -206,54 +148,48 @@ export class SubagentManager {
   }
 
   private registerLifecycleEvents() {
+    // Block session replacement when subagents are running.
+    this.pi.on("session_before_switch", (_event, ctx) => {
+      if (this.jobs.size > 0) {
+        ctx.ui.notify(
+          `Cannot switch sessions while ${this.jobs.size} subagent${this.jobs.size === 1 ? "" : "s"} running. Stop them with /subagent first.`,
+          "error",
+        );
+        return { cancel: true };
+      }
+    });
+
+    this.pi.on("session_before_fork", (_event, ctx) => {
+      if (this.jobs.size > 0) {
+        ctx.ui.notify(
+          `Cannot fork session while ${this.jobs.size} subagent${this.jobs.size === 1 ? "" : "s"} running. Stop them with /subagent first.`,
+          "error",
+        );
+        return { cancel: true };
+      }
+    });
+
+    this.pi.on("session_before_tree", (_event, ctx) => {
+      if (this.jobs.size > 0) {
+        ctx.ui.notify(
+          `Cannot navigate session tree while ${this.jobs.size} subagent${this.jobs.size === 1 ? "" : "s"} running. Stop them with /subagent first.`,
+          "error",
+        );
+        return { cancel: true };
+      }
+    });
+
     this.pi.on("session_start", (_e, ctx) => {
       this.generation++;
       this.shuttingDown = false;
       this.lifecycle = new AbortController();
       this.deliveredCompletionIds.clear();
       this.inFlightCompletionIds.clear();
-      const currentFile = ctx.sessionManager.getSessionFile() ?? "";
-      const currentId = ctx.sessionManager.getSessionId();
-      for (const job of this.jobs.values()) {
-        const isCurrentSession =
-          !job.originSessionId ||
-          !currentId ||
-          job.originSessionId === currentId ||
-          (job.originSessionFile &&
-            currentFile &&
-            job.originSessionFile === currentFile);
-        if (isCurrentSession) {
-          job.expectedGeneration = this.generation;
-          if (currentFile) job.originSessionFile = currentFile;
-          if (currentId) job.originSessionId = currentId;
-          job.handedOff = false;
-          if (job.activity === "finishing (session reload)") {
-            job.activity = undefined;
-          }
-          if (job.completionId) {
-            const path = join(this.handoffDir, `${job.completionId}.json`);
-            if (existsSync(path)) {
-              try {
-                rmSync(path, { force: true });
-              } catch {}
-            }
-          }
-        }
-      }
       for (const item of this.pendingCompletions) {
         item.expectedGeneration = this.generation;
       }
-      this.drainHandoffs(ctx);
       this.flushPendingCompletions(ctx);
       this.syncStatus(ctx);
-    });
-
-    this.pi.on("before_agent_start", (_event, ctx) => {
-      this.drainHandoffs(ctx);
-    });
-
-    this.pi.on("agent_settled", (_event, ctx) => {
-      this.drainHandoffs(ctx);
     });
 
     this.pi.on("message_end", (event) => {
@@ -269,74 +205,56 @@ export class SubagentManager {
       }
     });
 
-    this.pi.on("session_tree", (_event, ctx) => {
-      this.drainHandoffs(ctx);
-    });
-
-    this.pi.on("session_shutdown", async (event, ctx) => {
+    this.pi.on("session_shutdown", async (event, _ctx) => {
+      if (event.reason !== "quit") return;
       this.shuttingDown = true;
       this.lifecycle.abort();
       this.inFlightCompletionIds.clear();
       this.deliveredCompletionIds.clear();
+      this.pendingCompletions = [];
       if (this.widgetTimer) {
         clearInterval(this.widgetTimer);
         this.widgetTimer = undefined;
       }
-      if (this.handoffWatcher) {
-        clearInterval(this.handoffWatcher);
-        this.handoffWatcher = undefined;
-      }
-      if (event.reason === "quit") {
-        for (const [pid, job] of this.jobs) {
-          try {
-            job.record = {
-              ...this.currentRecord(job),
-              state: "interrupted",
-              updatedAt: new Date().toISOString(),
-              durationSec: Math.round((Date.now() - job.startedAt) / 1000),
-            };
-            saveRecord(job.record);
-          } catch (error) {
-            console.warn(
-              `Could not persist interrupted subagent ${pid}:`,
-              error,
-            );
-          } finally {
-            this.killJob(pid);
-          }
-        }
-        let shutdownTimeout: ReturnType<typeof setTimeout> | undefined;
-        let shutdownTimedOut = false;
-        const timeoutPromise = new Promise<void>((resolve) => {
-          shutdownTimeout = setTimeout(() => {
-            shutdownTimedOut = true;
-            resolve();
-          }, 10000);
-          shutdownTimeout.unref();
-        });
+      for (const [pid, job] of this.jobs) {
         try {
-          await Promise.race([
-            Promise.allSettled([...this.pending]),
-            timeoutPromise,
-          ]);
-          if (shutdownTimedOut) {
-            for (const [pid, job] of this.jobs) {
-              try {
-                job.forceCleanup();
-              } catch {}
-              this.jobs.delete(pid);
-            }
-          }
+          job.record = {
+            ...this.currentRecord(job),
+            state: "interrupted",
+            updatedAt: new Date().toISOString(),
+            durationSec: Math.round((Date.now() - job.startedAt) / 1000),
+          };
+          saveRecord(job.record);
+        } catch (error) {
+          console.warn(`Could not persist interrupted subagent ${pid}:`, error);
         } finally {
-          if (shutdownTimeout) clearTimeout(shutdownTimeout);
+          this.killJob(pid);
         }
-      } else {
-        // Session replacement (reload/new/resume/fork/clone): keep the
-        // child running in this runtime's closure and hand its result to
-        // the next runtime of the origin session through the handoff dir.
-        this.handoffActiveJobs(ctx);
-        this.startHandoffWatcher();
-        ensureGlobalExitHandler();
+      }
+      let shutdownTimeout: ReturnType<typeof setTimeout> | undefined;
+      let shutdownTimedOut = false;
+      const timeoutPromise = new Promise<void>((resolve) => {
+        shutdownTimeout = setTimeout(() => {
+          shutdownTimedOut = true;
+          resolve();
+        }, 10000);
+        shutdownTimeout.unref();
+      });
+      try {
+        await Promise.race([
+          Promise.allSettled([...this.pending]),
+          timeoutPromise,
+        ]);
+        if (shutdownTimedOut) {
+          for (const [pid, job] of this.jobs) {
+            try {
+              job.forceCleanup();
+            } catch {}
+            this.jobs.delete(pid);
+          }
+        }
+      } finally {
+        if (shutdownTimeout) clearTimeout(shutdownTimeout);
       }
       this.currentCtx = undefined;
     });
@@ -466,272 +384,6 @@ export class SubagentManager {
       );
       this.widgetTimer.unref?.();
     }
-  }
-
-  private hasPersistedCompletion(ids: string[], ctx: ExtensionContext) {
-    if (!ids.length) return false;
-    const idSet = new Set(ids);
-    try {
-      return ctx.sessionManager.getEntries().some((entry) => {
-        if ((entry as { type?: string }).type !== "message") return false;
-        const details = (
-          (entry as { message?: { details?: unknown } }).message ?? {}
-        ).details;
-        const completionIds =
-          details && typeof details === "object"
-            ? (details as { completionIds?: unknown }).completionIds
-            : undefined;
-        return (
-          Array.isArray(completionIds) &&
-          completionIds.some((id) => typeof id === "string" && idSet.has(id))
-        );
-      });
-    } catch {
-      return false;
-    }
-  }
-
-  public handoffPathFor(completionId?: string) {
-    if (!completionId) return undefined;
-    const path = join(this.handoffDir, `${completionId}.json`);
-    return existsSync(path) ? path : undefined;
-  }
-
-  public writeHandoffResult(
-    path: string,
-    result: NonNullable<HandoffEntry["result"]>,
-  ) {
-    try {
-      const entry = JSON.parse(readFileSync(path, "utf8")) as HandoffEntry;
-      atomicWriteFileSync(path, JSON.stringify({ ...entry, result }, null, 2));
-    } catch (error) {
-      console.warn("Could not persist handoff result:", error);
-    }
-  }
-
-  private ensureHandoffDir() {
-    ensurePrivateDir(this.handoffDir);
-  }
-
-  private handoffActiveJobs(ctx?: ExtensionContext) {
-    this.ensureHandoffDir();
-    const currentFile = ctx?.sessionManager?.getSessionFile?.() ?? "";
-    const currentId = ctx?.sessionManager?.getSessionId?.() ?? "";
-    for (const job of this.jobs.values()) {
-      if (!job.completionId) {
-        job.controller.abort();
-        continue;
-      }
-      const entry: HandoffEntry = {
-        v: 1,
-        pid: job.pid,
-        sessionId: job.sessionId,
-        sessionFile: job.originSessionFile || currentFile,
-        parentSessionId: job.originSessionId || currentId,
-        originLeafId: job.originLeafId,
-        startedAt: job.startedAt,
-        completion: job.completion ?? "queue",
-        completionId: job.completionId,
-        expectedGeneration: job.expectedGeneration,
-        command: job.command,
-      };
-      try {
-        atomicWriteFileSync(
-          join(this.handoffDir, `${job.completionId}.json`),
-          JSON.stringify(entry, null, 2),
-        );
-      } catch (error) {
-        console.warn("Could not persist handoff entry:", error);
-      }
-    }
-    for (const item of this.pendingCompletions) {
-      if (!item.completionId) continue;
-      const entry: HandoffEntry = {
-        v: 1,
-        pid: 0,
-        sessionFile: currentFile,
-        parentSessionId: currentId,
-        originLeafId: item.originLeafId,
-        startedAt: Date.now(),
-        completion: item.completion,
-        completionId: item.completionId,
-        expectedGeneration: item.expectedGeneration,
-        result: {
-          message: item.message,
-          displayMessage: item.displayMessage,
-          details: item.details,
-          triggerTurn: item.triggerTurn,
-        },
-      };
-      try {
-        atomicWriteFileSync(
-          join(this.handoffDir, `${item.completionId}.json`),
-          JSON.stringify(entry, null, 2),
-        );
-      } catch (error) {
-        console.warn(
-          "Could not persist pending completion handoff entry:",
-          error,
-        );
-      }
-    }
-  }
-
-  private stopRequested(completionId: string) {
-    return existsSync(join(this.handoffDir, `${completionId}.stop`));
-  }
-
-  private writeStopMarker(completionId: string) {
-    try {
-      atomicWriteFileSync(join(this.handoffDir, `${completionId}.stop`), "");
-    } catch (error) {
-      console.warn("Could not persist stop marker:", error);
-    }
-  }
-
-  private startHandoffWatcher() {
-    if (this.handoffWatcher) return;
-    this.handoffWatcher = setInterval(() => {
-      for (const job of this.jobs.values()) {
-        if (
-          job.completionId &&
-          this.stopRequested(job.completionId) &&
-          !job.controller.signal.aborted
-        ) {
-          job.stoppedManually = true;
-          job.stopping = true;
-          job.controller.abort();
-        }
-      }
-      if (this.currentCtx) this.drainHandoffs(this.currentCtx);
-      if (this.jobs.size === 0 && this.handoffWatcher) {
-        clearInterval(this.handoffWatcher);
-        this.handoffWatcher = undefined;
-      }
-    }, 500);
-    this.handoffWatcher.unref?.();
-  }
-
-  private drainHandoffs(ctx: ExtensionContext) {
-    this.ensureHandoffDir();
-    let restored = 0;
-    for (const name of readdirSync(this.handoffDir)) {
-      if (!name.endsWith(".json")) continue;
-      const path = join(this.handoffDir, name);
-      try {
-        const entry = JSON.parse(readFileSync(path, "utf8")) as HandoffEntry;
-        if (!entry.result && Date.now() - entry.startedAt > 10 * 60 * 1000) {
-          rmSync(path, { force: true });
-          if (entry.completionId) {
-            rmSync(join(this.handoffDir, `${entry.completionId}.stop`), {
-              force: true,
-            });
-          }
-          continue;
-        }
-        const currentFile = ctx.sessionManager.getSessionFile() ?? "";
-        const currentId = ctx.sessionManager.getSessionId();
-        if (
-          entry.sessionFile !== currentFile &&
-          !(entry.parentSessionId && entry.parentSessionId === currentId)
-        )
-          continue;
-        if (entry.result) {
-          const stopped = this.stopRequested(entry.completionId);
-          this.pendingCompletions.push({
-            message: entry.result.message,
-            completion: stopped ? "queue" : entry.completion,
-            expectedGeneration: this.generation,
-            originLeafId: entry.originLeafId,
-            triggerTurn: entry.result.triggerTurn,
-            completionId: entry.completionId,
-            displayMessage: entry.result.displayMessage,
-            details: entry.result.details,
-          });
-          this.jobs.delete(entry.pid);
-          rmSync(path, { force: true });
-          if (stopped)
-            rmSync(join(this.handoffDir, `${entry.completionId}.stop`), {
-              force: true,
-            });
-          continue;
-        }
-        if (this.jobs.has(entry.pid) && !this.jobs.get(entry.pid)?.handedOff) {
-          continue;
-        }
-        const stopped = entry.completionId
-          ? this.stopRequested(entry.completionId)
-          : false;
-        if (stopped) {
-          if (entry.sessionId) {
-            const durable = readIndex();
-            if (durable[entry.sessionId]) {
-              durable[entry.sessionId].state = "interrupted";
-              durable[entry.sessionId].updatedAt = new Date().toISOString();
-              saveRecord(durable[entry.sessionId]);
-            }
-          }
-          rmSync(path, { force: true });
-          if (entry.completionId)
-            rmSync(join(this.handoffDir, `${entry.completionId}.stop`), {
-              force: true,
-            });
-          this.jobs.delete(entry.pid);
-          continue;
-        }
-        const record =
-          (entry.sessionId ? readIndex()[entry.sessionId] : undefined) ??
-          ({
-            sessionId: entry.sessionId ?? `handoff-${entry.pid}`,
-            cwd: ctx.cwd,
-            sessionFile: "",
-            model: "unknown",
-            label: entry.command ?? `subagent ${entry.pid}`,
-            createdAt: new Date(entry.startedAt).toISOString(),
-            updatedAt: new Date().toISOString(),
-            state: "running",
-            turns: 0,
-            toolCount: 0,
-            toolFailures: 0,
-            usage: {
-              input: 0,
-              output: 0,
-              cacheRead: 0,
-              cacheWrite: 0,
-              total: 0,
-              cost: 0,
-            },
-            inheritedTools: [],
-            context: "project",
-          } as SubagentRecord);
-        const job: SubagentJob = {
-          pid: entry.pid,
-          command: entry.command ?? `subagent ${entry.pid}`,
-          startedAt: entry.startedAt,
-          sessionId: entry.sessionId ?? `handoff-${entry.pid}`,
-          controller: new AbortController(),
-          completionId: entry.completionId,
-          forceCleanup: () => {},
-          session: HANDED_OFF_SESSION,
-          activity: "finishing (session reload)",
-          baseline: HANDED_OFF_SESSION.getSessionStats(),
-          record,
-          toolFailures: 0,
-          completion: entry.completion,
-          originLeafId: entry.originLeafId,
-          expectedGeneration: entry.expectedGeneration,
-          originSessionFile: entry.sessionFile,
-          originSessionId: entry.parentSessionId ?? "",
-          handedOff: true,
-        };
-        this.jobs.set(entry.pid, job);
-        restored++;
-      } catch (error) {
-        console.warn("Could not read handoff entry:", error);
-      }
-    }
-    if (restored) this.startHandoffWatcher();
-    this.flushPendingCompletions(ctx);
   }
 
   private canDeliverToOrigin(
@@ -908,11 +560,7 @@ export class SubagentManager {
           entry.completionId ? [entry.completionId] : [],
         );
         for (const id of ids) this.inFlightCompletionIds.delete(id);
-        if (this.hasPersistedCompletion(ids, ctx)) {
-          for (const id of ids) this.deliveredCompletionIds.add(id);
-        } else {
-          this.pendingCompletions.push(...item.batchedItems);
-        }
+        this.pendingCompletions.push(...item.batchedItems);
         console.warn("Could not deliver pending subagent result:", error);
       }
     }
@@ -944,51 +592,7 @@ export class SubagentManager {
     displayMessage?: string,
     details?: unknown,
   ) {
-    if (this.shuttingDown) {
-      if (completionId) {
-        this.ensureHandoffDir();
-        const handoffPath = join(this.handoffDir, `${completionId}.json`);
-        if (existsSync(handoffPath)) {
-          this.writeHandoffResult(handoffPath, {
-            message,
-            displayMessage,
-            details,
-            triggerTurn,
-          });
-        }
-      }
-      return;
-    }
-
-    if (completionId) {
-      const handoffPath = this.handoffPathFor(completionId);
-      if (handoffPath) {
-        try {
-          rmSync(handoffPath, { force: true });
-        } catch {}
-      }
-      const stopPath = join(this.handoffDir, `${completionId}.stop`);
-      if (existsSync(stopPath)) {
-        try {
-          rmSync(stopPath, { force: true });
-        } catch {}
-      }
-    }
-    if (this.generation !== expectedGeneration) {
-      if (completionId) {
-        const handoffPath = join(this.handoffDir, `${completionId}.json`);
-        if (existsSync(handoffPath)) {
-          this.writeHandoffResult(handoffPath, {
-            message,
-            displayMessage,
-            details,
-            triggerTurn,
-          });
-          return;
-        }
-      }
-      return;
-    }
+    if (this.shuttingDown || this.generation !== expectedGeneration) return;
     if (
       completionId &&
       (this.deliveredCompletionIds.has(completionId) ||
@@ -1030,20 +634,16 @@ export class SubagentManager {
       );
     } catch (error) {
       if (completionId) this.inFlightCompletionIds.delete(completionId);
-      if (completionId && this.hasPersistedCompletion([completionId], active)) {
-        this.deliveredCompletionIds.add(completionId);
-      } else {
-        this.pendingCompletions.push({
-          message,
-          completion,
-          expectedGeneration,
-          originLeafId,
-          triggerTurn,
-          completionId,
-          displayMessage,
-          details,
-        });
-      }
+      this.pendingCompletions.push({
+        message,
+        completion,
+        expectedGeneration,
+        originLeafId,
+        triggerTurn,
+        completionId,
+        displayMessage,
+        details,
+      });
       console.warn("Could not deliver subagent result:", error);
     }
   }
@@ -1054,25 +654,10 @@ export class SubagentManager {
     job.stoppedManually = true;
     job.stopping = true;
     job.controller.abort();
-    if (job.completionId) {
-      this.writeStopMarker(job.completionId);
-    }
     this.pi.events?.emit("subagent:stop", {
       pid,
       sessionId: job.sessionId,
     });
-    if (job.handedOff) {
-      try {
-        job.record = {
-          ...job.record,
-          state: "interrupted",
-          updatedAt: new Date().toISOString(),
-          durationSec: Math.round((Date.now() - job.startedAt) / 1000),
-        };
-        saveRecord(job.record);
-      } catch {}
-      this.jobs.delete(pid);
-    }
     return true;
   }
 

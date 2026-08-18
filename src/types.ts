@@ -8,7 +8,6 @@ import { mkdirSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 export const SUBAGENT_DIR = join(getAgentDir(), "pi-subagents");
-export const HANDOFF_DIR = join(SUBAGENT_DIR, "handoff");
 export const LOG_DIR = join(SUBAGENT_DIR, "logs");
 const MAX_RETAINED_LOGS = 50;
 export const SUBAGENT_SESSION_DIR = join(SUBAGENT_DIR, "sessions");
@@ -78,7 +77,6 @@ export interface SubagentJob {
   expectedGeneration: number;
   originSessionFile: string;
   originSessionId: string;
-  handedOff?: boolean;
   session: SubagentJobSession;
   activity?: string;
   baseline: SessionStats;
