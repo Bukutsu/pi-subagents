@@ -232,11 +232,12 @@ export function registerSubagentModule(
     name: "subagent",
     label: "Subagent",
     description:
-      "Delegate a self-contained task to a durable child Pi session. The child uses the parent model and tools, then reports its result automatically.",
+      "Delegate a self-contained task to a child Pi session. By default, executes synchronously and returns the child's final output. Use background:true to run asynchronously.",
     promptSnippet: "Delegate a self-contained task to a subagent.",
     promptGuidelines: [
-      "Use subagent for multi-step or isolated work. After spawning, continue useful independent work and never poll status or sleep.",
-      "The child result wakes the parent automatically. Use background:true only when the result should wait silently for a later turn.",
+      "Use subagent for multi-step or isolated work. By default, subagent blocks and returns its result directly in the tool response.",
+      "Spawn multiple subagents in one turn to execute them in parallel (e.g. multi-perspective reviews or disjoint tasks).",
+      "Use background:true only when the task should run asynchronously in the background without blocking the current turn.",
       "The child inherits the parent model, thinking level, tools, and working directory. Use worktree:true for concurrent writers that need isolation.",
       "Give each child a self-contained task with the expected result and relevant files; do not rely on the child seeing parent conversation history.",
     ],
@@ -1745,28 +1746,42 @@ export function registerSubagentModule(
             toolCount: completedRecord.toolCount,
             toolFailures: completedRecord.toolFailures,
           };
-          if (handoffPath) {
-            // The old runtime cannot deliver through the stale extension
-            // context; persist the result for the origin session's next
-            // runtime.
+          if (background) {
+            if (handoffPath) {
+              // The old runtime cannot deliver through the stale extension
+              // context; persist the result for the origin session's next
+              // runtime.
+              manager.writeHandoffResult(handoffPath, {
+                message: compact,
+                displayMessage: display,
+                details: completionDetails,
+                triggerTurn: !job.stoppedManually,
+              });
+            } else {
+              manager.deliverCompletion(
+                compact,
+                job.stoppedManually ? "queue" : (job.completion ?? "queue"),
+                expectedGeneration,
+                originLeafId,
+                !job.stoppedManually,
+                completionId,
+                display,
+                completionDetails,
+              );
+            }
+          } else if (handoffPath) {
             manager.writeHandoffResult(handoffPath, {
               message: compact,
               displayMessage: display,
               details: completionDetails,
-              triggerTurn: !job.stoppedManually,
+              triggerTurn: true,
             });
-          } else {
-            manager.deliverCompletion(
-              compact,
-              job.stoppedManually ? "queue" : (job.completion ?? "queue"),
-              expectedGeneration,
-              originLeafId,
-              !job.stoppedManually,
-              completionId,
-              display,
-              completionDetails,
-            );
           }
+          return {
+            compact,
+            display,
+            completionDetails,
+          };
         } finally {
           clearTimeout(timer);
           if (activityTimer) clearTimeout(activityTimer);
@@ -1785,6 +1800,39 @@ export function registerSubagentModule(
         }
       })();
       manager.track(done);
+
+      if (signal) {
+        if (signal.aborted) {
+          controller.abort();
+        } else {
+          signal.addEventListener("abort", () => controller.abort(), {
+            once: true,
+          });
+        }
+      }
+
+      if (!background) {
+        const result = await done;
+        return {
+          content: [
+            {
+              type: "text",
+              text: result.compact,
+            },
+          ],
+          details: {
+            ...result.completionDetails,
+            displayText: result.display,
+            ...(branch ? { branch } : {}),
+            ...(modelFallbackMessage
+              ? { modelFallback: modelFallbackMessage }
+              : {}),
+            ...(toolInheritanceWarning
+              ? { toolWarning: toolInheritanceWarning }
+              : {}),
+          },
+        };
+      }
 
       const location = branch ? `\nBranch: ${branch}` : "";
       const displayText = `${existing ? "Continued" : "Created"} subagent "${label}" [${displayModel}:${session.thinkingLevel}] • Session: ${session.sessionId}.${location}${fallback}`;

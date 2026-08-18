@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Execute subagent tasks synchronously by default, returning completed results directly in tool responses to eliminate polling sleep loops and align with multi-tool parallel execution; use `background: true` for asynchronous execution.
 - Bundle `multi-agent-worktree` skill providing practical guidance on parallel editing, environment replication, port isolation, baseline test verification, and clean git branch integration.
 - Isolate child session extensions via `extensionsOverride` on explicit `DefaultResourceLoader` to prevent recursive loading of `pi-subagents` and duplicate lifecycle hooks.
 - Check `git status --porcelain` before creating worktrees, preventing silent divergence from uncommitted parent changes.

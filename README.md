@@ -19,7 +19,7 @@ When working on complex projects, you often need to run independent tasks in par
 
 1. **Zero configuration**: The child session automatically inherits your active model, thinking budget, active tools, and working directory.
 2. **In-process & fast**: No Docker containers or background daemons. Children run as lightweight Pi agent sessions inside the same process.
-3. **Automatic wake-up**: When the child finishes, it delivers its result and automatically wakes up the parent turn. No status polling or sleep loops needed.
+3. **Synchronous by default**: Subagents block and return their full output directly in the tool response. Multiple subagents called in the same turn execute concurrently in parallel.
 4. **Survives session reloads**: If you run `/reload`, `/new`, or `/resume`, running subagents keep executing in the background and hand their results over to the new session when finished.
 
 ## Install
@@ -64,9 +64,9 @@ Set `worktree: true` to give the child an isolated Git worktree on a dedicated b
   git branch -D pi-subagents/1740000000000-a1b2c3d4
   ```
 
-### 3. Silent Background Tasks (`background: true`)
+### 3. Asynchronous Background Tasks (`background: true`)
 
-If you want the subagent to run silently in the background without immediately interrupting your conversation when it finishes:
+If you want the subagent to run in the background without blocking the current turn:
 
 ```json
 {
@@ -85,7 +85,7 @@ The result is queued silently until your next prompt turn.
 | :----------- | :-------- | :--------- | :--------------------------------------------------------------------------------- |
 | `prompt`     | `string`  | _required_ | Self-contained task instructions for the child session.                            |
 | `worktree`   | `boolean` | `false`    | Creates an isolated Git worktree for concurrent writers. Omit for read-only tasks. |
-| `background` | `boolean` | `false`    | Queues the result silently instead of waking the parent turn immediately.          |
+| `background` | `boolean` | `false`    | Runs asynchronously in the background instead of blocking the current turn.        |
 
 ---
 
