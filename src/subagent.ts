@@ -16,7 +16,10 @@ import {
   SettingsManager,
   truncateTail,
 } from "@earendil-works/pi-coding-agent";
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import type {
+  ExtensionAPI,
+  ExtensionContext,
+} from "@earendil-works/pi-coding-agent";
 import {
   type AssistantMessage,
   type Model,
@@ -38,8 +41,10 @@ import {
 } from "./types.js";
 import {
   acquireSessionLock,
+  describeSubagentModel,
   extractTextContent,
   getScopedModels,
+  getSubagentModelCandidates,
   isPathInsideAny,
   isSubagentRecord,
   MODEL_OUTPUT_MAX_BYTES,
@@ -171,6 +176,81 @@ export function registerSubagentModule(
     return cards.join("\n\n");
   }
 
+  function listSubagentModels(ctx: ExtensionContext, offset = 0) {
+    const candidates = getSubagentModelCandidates(ctx);
+    const allModels = candidates.map((candidate) =>
+      describeSubagentModel(candidate, ctx.model),
+    );
+    const models = allModels.slice(offset, offset + MAX_LIST_ITEMS);
+    const nextOffset =
+      offset + models.length < allModels.length
+        ? offset + models.length
+        : undefined;
+    const unrestricted = getScopedModels(ctx).length === 0;
+    const display = `${unrestricted ? "Available subagent models" : "Scoped subagent models"}:\n${models
+      .map(
+        (entry) =>
+          `- ${entry.model}${entry.current ? " (current)" : ""}${entry.reasoning ? " [reasoning]" : ""}`,
+      )
+      .join("\n")}`;
+    return {
+      content: [
+        {
+          type: "text" as const,
+          text: JSON.stringify({
+            v: 1,
+            type: "subagent",
+            action: "models",
+            scope: unrestricted ? "unrestricted" : "restricted",
+            current: ctx.model
+              ? `${ctx.model.provider}/${ctx.model.id}`
+              : undefined,
+            models,
+            ...(nextOffset !== undefined ? { nextOffset } : {}),
+            total: allModels.length,
+          }),
+        },
+      ],
+      details: {
+        models,
+        unrestricted,
+        nextOffset,
+        total: allModels.length,
+        displayText: display,
+      },
+    };
+  }
+
+  pi.registerTool({
+    name: "subagent_models",
+    label: "Subagent Models",
+    description:
+      "List live Pi models available to subagents with reasoning, context, input, thinking, and cost-per-million-token metadata. Use this only when model choice matters.",
+    promptSnippet:
+      "List live models available to subagents for deliberate model selection.",
+    parameters: Type.Object({
+      offset: Type.Optional(
+        Type.Integer({
+          minimum: 0,
+          description: "Pagination offset from a previous nextOffset value",
+        }),
+      ),
+    }),
+    async execute(_id, args: { offset?: number }, _signal, _up, ctx) {
+      return listSubagentModels(ctx, Math.max(0, args.offset ?? 0));
+    },
+    renderCall(_args, theme) {
+      return new Text(
+        theme.fg("toolTitle", theme.bold("Subagent models")),
+        0,
+        0,
+      );
+    },
+    renderResult(result, options, theme) {
+      return renderToolResult(result, options, theme, 12);
+    },
+  });
+
   pi.registerCommand("subagent", {
     description: "List and manage background subagents",
     getArgumentCompletions: (prefix) => {
@@ -230,13 +310,16 @@ export function registerSubagentModule(
     name: "subagent",
     label: "Subagent",
     description:
-      "Delegate a self-contained task to an isolated child Pi session. Runs synchronously and returns the child's output by default, or runs in the background when background: true.",
-    promptSnippet: "Delegate a self-contained task to a child subagent session.",
+      "Delegate self-contained work to a child Pi session. Omit model to inherit the current model; query subagent_models when task requirements make another live model a better fit.",
+    promptSnippet:
+      "Delegate self-contained work to a child session; inherit the current model unless a better live candidate is needed.",
     promptGuidelines: [
-      "Spawn multiple subagents in one turn for parallel execution (such as multi-perspective reviews or independent file edits).",
-      "Use worktree: true whenever subagents edit files or run mutating commands to isolate changes on a private Git branch.",
-      "Provide all necessary context, file paths, and checkable completion criteria directly in prompt; child sessions run with fresh conversation history.",
-      "Use background: true for asynchronous tasks when current turn actions do not depend on the child's immediate output.",
+      "Use subagent for self-contained work and include the exact paths, constraints, and completion criteria the child needs.",
+      "Omit model for ordinary delegation so the child inherits the current parent model.",
+      "Call subagent_models only when reasoning quality, context size, cost, or input modality makes model choice material; then pass an exact returned model ID.",
+      "Prefer reasoning models for debugging, architecture, review, and planning; prefer lower-cost models for mechanical or easily parallelized tasks.",
+      "Use worktree: true for concurrent edits or any child mutation that must be isolated; omit it for read-only work.",
+      "Use background: true only when the current turn does not depend on the result.",
     ],
     prepareArguments(args: unknown) {
       // Legacy callers may still pass tool arrays; the public contract does
@@ -253,6 +336,12 @@ export function registerSubagentModule(
         description:
           "Self-contained task instructions with context, file paths, and completion criteria",
       }),
+      model: Type.Optional(
+        Type.String({
+          description:
+            "Exact provider/model ID from subagent_models; omit to inherit the current parent model",
+        }),
+      ),
       worktree: Type.Optional(
         Type.Boolean({
           description:
@@ -299,6 +388,7 @@ export function registerSubagentModule(
       const scopedModels = configuredScope.filter((entry) =>
         availableIds.has(`${entry.model.provider}/${entry.model.id}`),
       );
+      const selectionCandidates = getSubagentModelCandidates(ctx);
       const requestedId = sessionId?.trim();
       let durableCache: Record<string, SubagentRecord> | undefined;
       const getDurable = () => (durableCache ??= readIndex());
@@ -417,11 +507,7 @@ export function registerSubagentModule(
         let resolvedThinking: ThinkingLevel | undefined;
         let modelRequestWarning: string | undefined;
         const scopedList = scopedModels;
-        const modelCandidates = scopeRestricted
-          ? scopedList
-          : ctx.modelRegistry
-              .getAvailable()
-              .map((model) => ({ model, thinkingLevel: undefined }));
+        const modelCandidates = selectionCandidates;
         if (modelSpec) {
           if (scopeRestricted && modelCandidates.length === 0)
             throw new Error(
@@ -499,8 +585,7 @@ export function registerSubagentModule(
                 ThinkingLevel | undefined;
             } else if (ctx.model) {
               resolvedModel = ctx.model;
-              resolvedThinking = ctx.thinkingLevel as
-                ThinkingLevel | undefined;
+              resolvedThinking = ctx.thinkingLevel as ThinkingLevel | undefined;
             } else {
               const fallback = scopedList[0];
               resolvedModel = fallback.model;
@@ -807,6 +892,10 @@ export function registerSubagentModule(
               (entry) =>
                 entry.model.provider === initializedModel.provider &&
                 entry.model.id === initializedModel.id,
+            ) &&
+            !(
+              ctx.model?.provider === initializedModel.provider &&
+              ctx.model.id === initializedModel.id
             )
           ) {
             throw new Error(
@@ -902,54 +991,7 @@ export function registerSubagentModule(
             await parentRuntime.refresh({ allowNetwork: false });
           } catch {}
         }
-        const unrestricted = !scopeRestricted;
-        const allModels = (
-          unrestricted
-            ? availableModels.map((model) => ({ model }))
-            : scopedModels
-        ).map((entry) => ({
-          model: `${entry.model.provider}/${entry.model.id}`,
-          ...("thinkingLevel" in entry && entry.thinkingLevel
-            ? { thinking: entry.thinkingLevel as ThinkingLevel }
-            : {}),
-        }));
-        const models = allModels.slice(
-          modelOffset,
-          modelOffset + MAX_LIST_ITEMS,
-        );
-        const nextOffset =
-          modelOffset + models.length < allModels.length
-            ? modelOffset + models.length
-            : undefined;
-        const display = `${unrestricted ? "Available subagent models (scope unrestricted)" : "Available scoped subagent models"}:\n${models
-          .map(
-            (entry) =>
-              `- ${entry.model}${entry.thinking ? `:${entry.thinking}` : ""}`,
-          )
-          .join("\n")}`;
-        return {
-          content: [
-            {
-              type: "text" as const,
-              text: JSON.stringify({
-                v: 1,
-                type: "subagent",
-                action: "models",
-                scope: unrestricted ? "unrestricted" : "restricted",
-                models,
-                ...(nextOffset !== undefined ? { nextOffset } : {}),
-                total: allModels.length,
-              }),
-            },
-          ],
-          details: {
-            models,
-            unrestricted,
-            nextOffset,
-            total: allModels.length,
-            displayText: display,
-          },
-        };
+        return listSubagentModels(ctx, Math.max(0, modelOffset));
       }
       if (action === "status") {
         const active = new Map(

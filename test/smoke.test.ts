@@ -42,9 +42,12 @@ test("registers the subagent tool and slash command", async () => {
   assert.ok(commands.some((command) => command.name === "subagent"));
   assert.deepEqual(Object.keys(subagent.parameters.properties), [
     "prompt",
+    "model",
     "worktree",
     "background",
   ]);
+  const modelTool = tools.find((tool) => tool.name === "subagent_models");
+  assert.ok(modelTool);
 
   const ctx: any = {
     cwd: process.cwd(),
@@ -68,6 +71,50 @@ test("registers the subagent tool and slash command", async () => {
   );
   assert.deepEqual(JSON.parse(status.content[0].text).sessions, []);
   assert.equal(status.details.displayText, "No matching subagent sessions.");
+});
+
+test("lists the current model before scoped alternatives", async () => {
+  const { tools } = setup();
+  const current = {
+    provider: "provider",
+    id: "current",
+    name: "Current",
+    reasoning: true,
+    contextWindow: 100_000,
+    maxTokens: 10_000,
+    input: ["text"],
+    cost: { input: 1, output: 2, cacheRead: 0, cacheWrite: 0 },
+  };
+  const alternative = {
+    provider: "provider",
+    id: "alternative",
+    name: "Alternative",
+    reasoning: false,
+    contextWindow: 32_000,
+    maxTokens: 4_000,
+    input: ["text"],
+    cost: { input: 0.1, output: 0.2, cacheRead: 0, cacheWrite: 0 },
+  };
+  const modelTool = tools.find((tool) => tool.name === "subagent_models");
+  const ctx: any = {
+    model: current,
+    scopedModels: [{ model: alternative }],
+    modelRegistry: {
+      getAvailable: () => [current, alternative],
+    },
+  };
+
+  const result = await modelTool.execute(
+    "models-current-first",
+    {},
+    undefined,
+    undefined,
+    ctx,
+  );
+  const parsed = JSON.parse(result.content[0].text);
+  assert.equal(parsed.models[0].model, "provider/current");
+  assert.equal(parsed.models[0].current, true);
+  assert.equal(parsed.models[1].model, "provider/alternative");
 });
 
 test("queries the live session model scope", async () => {

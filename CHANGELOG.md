@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Add live `subagent_models` discovery and optional exact model selection; children inherit the parent’s current model by default.
 - Block session switches, forks, and tree navigation when subagents are running to prevent stale extension context crashes.
 - Make extension reload and any replacement shutdown wait until running subagents finish or are stopped.
 - Remove session handoff code (`handoffDir`, `drainHandoffs`, `handoffActiveJobs`, `writeHandoffResult`, `startHandoffWatcher`) — no longer needed since session replacement is blocked.

@@ -13,7 +13,7 @@ When working on complex projects, you often need to run independent tasks in par
 - Have two agents explore competing implementations of the same feature simultaneously.
 - Split a large refactor across independent modules without merge conflicts.
 
-`pi-subagents` gives the LLM a single tool: `subagent`.
+`pi-subagents` gives the LLM two focused tools: `subagent` for delegation and `subagent_models` for deliberate model selection.
 
 ## How it works
 
@@ -42,7 +42,24 @@ For code audits, questions, investigations, or sequential work:
 
 The child investigates using `read`, `bash`, `grep`, etc., and returns its findings directly to the parent conversation.
 
-### 2. Parallel Coding with Git Worktrees (`worktree: true`)
+### 2. Choosing a Model
+
+Children inherit the parent’s current model by default. For specialized work, query the live Pi model list first, then pass an exact model ID:
+
+```text
+subagent_models({})
+```
+
+```text
+subagent({
+  "prompt": "Review the authentication flow for security issues",
+  "model": "provider/model-id"
+})
+```
+
+Use `subagent_models` when reasoning ability, context size, cost, or input modality materially affects the task. Do not choose a model just because it appears first in the list.
+
+### 3. Parallel Coding with Git Worktrees (`worktree: true`)
 
 When multiple subagents need to write or edit code at the same time, running them in the same workspace causes race conditions and file collisions.
 
@@ -64,7 +81,7 @@ Set `worktree: true` to give the child an isolated Git worktree on a dedicated b
   git branch -D pi-subagents/1740000000000-a1b2c3d4
   ```
 
-### 3. Asynchronous Background Tasks (`background: true`)
+### 4. Asynchronous Background Tasks (`background: true`)
 
 If you want the subagent to run in the background without blocking the current turn:
 
@@ -81,11 +98,14 @@ The result is queued silently until your next prompt turn.
 
 ## Tool Reference
 
-| Parameter    | Type      | Default    | Description                                                                                         |
-| :----------- | :-------- | :--------- | :-------------------------------------------------------------------------------------------------- |
-| `prompt`     | `string`  | _required_ | Self-contained task instructions with context, file paths, and completion criteria.                 |
-| `worktree`   | `boolean` | `false`    | Run in an isolated Git worktree; required for concurrent file writes. Omit for read-only tasks.      |
-| `background` | `boolean` | `false`    | Run asynchronously in the background without blocking the current turn.                            |
+| Parameter    | Type      | Default    | Description                                                                                     |
+| :----------- | :-------- | :--------- | :---------------------------------------------------------------------------------------------- |
+| `prompt`     | `string`  | _required_ | Self-contained task instructions with context, file paths, and completion criteria.             |
+| `model`      | `string`  | _unset_    | Exact model ID from `subagent_models`; omit to inherit the current model.                       |
+| `worktree`   | `boolean` | `false`    | Run in an isolated Git worktree; required for concurrent file writes. Omit for read-only tasks. |
+| `background` | `boolean` | `false`    | Run asynchronously in the background without blocking the current turn.                         |
+
+`subagent_models` accepts an optional `offset` for pagination and returns live Pi model capabilities.
 
 ---
 

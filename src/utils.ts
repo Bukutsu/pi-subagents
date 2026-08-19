@@ -12,9 +12,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
-import {
-  getMarkdownTheme,
-} from "@earendil-works/pi-coding-agent";
+import { getMarkdownTheme } from "@earendil-works/pi-coding-agent";
 import type {
   AgentToolResult,
   ExtensionContext,
@@ -22,6 +20,7 @@ import type {
   Theme,
 } from "@earendil-works/pi-coding-agent";
 import { Markdown, Text } from "@earendil-works/pi-tui";
+import type { Model } from "@earendil-works/pi-ai";
 import {
   SUBAGENT_INDEX,
   SUBAGENT_LOCKS,
@@ -374,6 +373,86 @@ export function getScopedModels(ctx: ExtensionContext) {
   // ctx.scopedModels is typed on ExtensionContext; the fallback keeps the
   // package usable against older pi runtimes that did not expose it.
   return ctx.scopedModels ?? [];
+}
+
+export type SubagentModelCandidate = {
+  model: Model<any>;
+  thinkingLevel?: string;
+};
+
+function modelKey(model: Pick<Model<any>, "provider" | "id">) {
+  return `${model.provider}/${model.id}`;
+}
+
+/**
+ * Return live child-model candidates in parent-first order. Pi's scope is an
+ * availability list, not a ranking: the model currently selected by the
+ * parent must remain the default even when it is absent from that list.
+ */
+export function getSubagentModelCandidates(
+  ctx: ExtensionContext,
+): SubagentModelCandidate[] {
+  const scoped = getScopedModels(ctx);
+  const available = ctx.modelRegistry.getAvailable();
+  const availableIds = new Set(available.map(modelKey));
+  const candidates: SubagentModelCandidate[] =
+    scoped.length > 0
+      ? scoped
+          .filter((entry) => availableIds.has(modelKey(entry.model)))
+          .map((entry) => ({
+            model: entry.model,
+            thinkingLevel: entry.thinkingLevel,
+          }))
+      : available.map((model) => ({ model }));
+  const current = ctx.model;
+  if (!current) return candidates;
+
+  const currentIndex = candidates.findIndex(
+    (entry) => modelKey(entry.model) === modelKey(current),
+  );
+  if (currentIndex === 0) return candidates;
+  if (currentIndex > 0) {
+    const [currentEntry] = candidates.splice(currentIndex, 1);
+    candidates.unshift(currentEntry);
+  } else {
+    candidates.unshift({ model: current });
+  }
+  return candidates;
+}
+
+export function describeSubagentModel(
+  candidate: SubagentModelCandidate,
+  current?: Model<any>,
+) {
+  const { model } = candidate;
+  const thinking = Object.entries(model.thinkingLevelMap ?? {})
+    .filter(([, value]) => value !== null)
+    .map(([level]) => level);
+  return {
+    model: modelKey(model),
+    ...(model.name ? { name: model.name } : {}),
+    ...(current && modelKey(model) === modelKey(current)
+      ? { current: true }
+      : {}),
+    reasoning: model.reasoning,
+    contextWindow: model.contextWindow,
+    maxTokens: model.maxTokens,
+    input: model.input,
+    ...(candidate.thinkingLevel
+      ? { configuredThinking: candidate.thinkingLevel }
+      : {}),
+    ...(thinking.length ? { thinking } : {}),
+    ...(model.cost
+      ? {
+          costPerMillionTokens: {
+            input: model.cost.input,
+            output: model.cost.output,
+            cacheRead: model.cost.cacheRead,
+            cacheWrite: model.cost.cacheWrite,
+          },
+        }
+      : {}),
+  };
 }
 
 export function isPathInside(root: string, target: string) {
