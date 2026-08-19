@@ -81,11 +81,11 @@ The result is queued silently until your next prompt turn.
 
 ## Tool Reference
 
-| Parameter    | Type      | Default    | Description                                                                        |
-| :----------- | :-------- | :--------- | :--------------------------------------------------------------------------------- |
-| `prompt`     | `string`  | _required_ | Self-contained task instructions for the child session.                            |
-| `worktree`   | `boolean` | `false`    | Creates an isolated Git worktree for concurrent writers. Omit for read-only tasks. |
-| `background` | `boolean` | `false`    | Runs asynchronously in the background instead of blocking the current turn.        |
+| Parameter    | Type      | Default    | Description                                                                                         |
+| :----------- | :-------- | :--------- | :-------------------------------------------------------------------------------------------------- |
+| `prompt`     | `string`  | _required_ | Self-contained task instructions with context, file paths, and completion criteria.                 |
+| `worktree`   | `boolean` | `false`    | Run in an isolated Git worktree; required for concurrent file writes. Omit for read-only tasks.      |
+| `background` | `boolean` | `false`    | Run asynchronously in the background without blocking the current turn.                            |
 
 ---
 

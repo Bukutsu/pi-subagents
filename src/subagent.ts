@@ -232,14 +232,13 @@ export function registerSubagentModule(
     name: "subagent",
     label: "Subagent",
     description:
-      "Delegate a self-contained task to a child Pi session. By default, executes synchronously and returns the child's final output. Use background:true to run asynchronously.",
-    promptSnippet: "Delegate a self-contained task to a subagent.",
+      "Delegate a self-contained task to an isolated child Pi session. Runs synchronously and returns the child's output by default, or runs in the background when background: true.",
+    promptSnippet: "Delegate a self-contained task to a child subagent session.",
     promptGuidelines: [
-      "Use subagent for multi-step or isolated work. By default, subagent blocks and returns its result directly in the tool response.",
-      "Spawn multiple subagents in one turn to execute them in parallel (e.g. multi-perspective reviews or disjoint tasks).",
-      "Use background:true only when the task should run asynchronously in the background without blocking the current turn.",
-      "The child inherits the parent model, thinking level, tools, and working directory. Use worktree:true for concurrent writers that need isolation.",
-      "Give each child a self-contained task with the expected result and relevant files; do not rely on the child seeing parent conversation history.",
+      "Spawn multiple subagents in one turn for parallel execution (such as multi-perspective reviews or independent file edits).",
+      "Use worktree: true whenever subagents edit files or run mutating commands to isolate changes on a private Git branch.",
+      "Provide all necessary context, file paths, and checkable completion criteria directly in prompt; child sessions run with fresh conversation history.",
+      "Use background: true for asynchronous tasks when current turn actions do not depend on the child's immediate output.",
     ],
     prepareArguments(args: unknown) {
       // Legacy callers may still pass tool arrays; the public contract does
@@ -252,17 +251,20 @@ export function registerSubagentModule(
       return args as any;
     },
     parameters: Type.Object({
-      prompt: Type.String({ description: "Self-contained task for the child" }),
+      prompt: Type.String({
+        description:
+          "Self-contained task instructions with context, file paths, and completion criteria",
+      }),
       worktree: Type.Optional(
         Type.Boolean({
           description:
-            "Create an isolated Git worktree for the child; use for concurrent writers",
+            "Run in an isolated Git worktree; required for concurrent file writes",
         }),
       ),
       background: Type.Optional(
         Type.Boolean({
           description:
-            "Keep the result queued without automatically waking the parent",
+            "Run asynchronously in the background without blocking the current turn",
         }),
       ),
     }),
