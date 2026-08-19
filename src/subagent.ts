@@ -5,7 +5,6 @@ import {
   realpathSync,
   rmSync,
   statSync,
-  writeFileSync,
 } from "node:fs";
 import { join, sep } from "node:path";
 import {
@@ -41,7 +40,6 @@ import {
   acquireSessionLock,
   extractTextContent,
   getScopedModels,
-  isPathInside,
   isPathInsideAny,
   isSubagentRecord,
   MODEL_OUTPUT_MAX_BYTES,

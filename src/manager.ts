@@ -8,20 +8,11 @@ import {
   visibleWidth,
   truncateToWidth,
 } from "@earendil-works/pi-tui";
-import {
-  existsSync,
-  mkdirSync,
-  readdirSync,
-  readFileSync,
-  rmSync,
-  writeFileSync,
-} from "node:fs";
-import { join } from "node:path";
+
 import {
   SUBAGENT_DIR,
   SUBAGENT_SESSION_DIR,
   type SubagentJob,
-  type SubagentJobSession,
   type SubagentRecord,
 } from "./types.js";
 
@@ -37,7 +28,6 @@ function getGlobalActiveJobs(): Map<number, SubagentJob> {
 }
 
 import {
-  atomicWriteFileSync,
   createMarkdownComponent,
   displayText,
   ensurePrivateDir,

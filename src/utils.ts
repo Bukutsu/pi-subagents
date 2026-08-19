@@ -13,9 +13,7 @@ import {
 } from "node:fs";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import {
-  buildSessionContext,
   getMarkdownTheme,
-  truncateTail,
 } from "@earendil-works/pi-coding-agent";
 import type {
   AgentToolResult,
