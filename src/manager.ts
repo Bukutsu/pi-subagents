@@ -205,8 +205,21 @@ export class SubagentManager {
       }
     });
 
-    this.pi.on("session_shutdown", async (event, _ctx) => {
-      if (event.reason !== "quit") return;
+    this.pi.on("session_shutdown", async (event, ctx) => {
+      if (event.reason !== "quit") {
+        if (this.jobs.size > 0) {
+          const action =
+            event.reason === "reload" ? "Reload" : "Session replacement";
+          ctx.ui.notify(
+            `${action} is waiting for ${this.jobs.size} running subagent${this.jobs.size === 1 ? "" : "s"}. Stop them with /subagent or wait for them to finish.`,
+            "info",
+          );
+          while (this.jobs.size > 0) {
+            await new Promise((resolve) => setTimeout(resolve, 100));
+          }
+        }
+        return;
+      }
       this.shuttingDown = true;
       this.lifecycle.abort();
       this.inFlightCompletionIds.clear();

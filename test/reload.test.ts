@@ -87,46 +87,35 @@ function createCtx(sessionFile: string | undefined = undefined) {
   };
 }
 
-test("reload preserves live in-process subagent job across extension reload", async () => {
+test("extension reload waits for running subagents", async () => {
   clearGlobalJobs();
   const { pi: oldPi, handlers: oldHandlers } = createFakePi();
   const oldManager = new SubagentManager(oldPi as any);
   oldManager.init();
   await oldHandlers.get("session_start")!(undefined, createCtx());
-  const childController = new AbortController();
   oldManager.jobs.set(100, {
     pid: 100,
     command: "Subagent: audit",
     startedAt: Date.now(),
     sessionId: "session-abc",
-    controller: childController,
-    completionId: "completion-reload-s1",
+    controller: new AbortController(),
     forceCleanup: () => {},
-    session: {
-      getSessionStats: () => ({ assistantMessages: 0, toolCalls: 0 }),
-    },
-    activity: "thinking",
-    baseline: { assistantMessages: 0, toolCalls: 0 },
-    record: createTestRecord("session-abc"),
-    toolFailures: 0,
-    completion: "queue",
-    originLeafId: "leaf-1",
-    expectedGeneration: oldManager.generation,
-    originSessionFile: "",
   } as any);
 
-  await oldHandlers.get("session_shutdown")!({ reason: "reload" }, createCtx());
-  // Reload is blocked by before_* handlers, so shutdown doesn't fire.
-  // But if it does fire for non-quit reasons, jobs should be untouched.
-  const restored = oldManager.jobs.get(100);
-  assert.notEqual(
-    restored,
-    undefined,
-    "job still exists after non-quit shutdown",
+  let finished = false;
+  const shutdown = oldHandlers.get("session_shutdown")!(
+    { reason: "reload" },
+    createCtx(),
   );
+  shutdown.then(() => {
+    finished = true;
+  });
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.equal(finished, false, "reload remains blocked while job is running");
 
-  // Clean up
   oldManager.jobs.delete(100);
+  await shutdown;
+  assert.equal(finished, true, "reload continues after job stops");
 });
 
 test("quit cleans up all jobs", async () => {
@@ -205,18 +194,28 @@ test("session switch is blocked when subagents are running", async () => {
     },
   };
 
-  // session_before_switch should cancel when jobs are running
-  const result = await handlers.get("session_before_switch")!(
-    { reason: "resume" },
-    switchCtx,
-  );
-  assert.deepEqual(result, { cancel: true });
+  for (const event of [
+    "session_before_switch",
+    "session_before_fork",
+    "session_before_tree",
+  ]) {
+    manager.jobs.set(300, {
+      pid: 300,
+      command: "Subagent: blocking test",
+      startedAt: Date.now(),
+      sessionId: "session-block",
+      controller: new AbortController(),
+      forceCleanup: () => {},
+    } as any);
+    const result = await handlers.get(event)!({ reason: "resume" }, switchCtx);
+    assert.deepEqual(result, { cancel: true }, `${event} is blocked`);
+    manager.jobs.delete(300);
+  }
   assert.ok(
-    notifyMessages.some((m) => m.includes("subagent")),
+    notifyMessages.length >= 3 &&
+      notifyMessages.every((m) => m.includes("subagent")),
     "notifies user about running subagents",
   );
-
-  manager.jobs.delete(300);
 });
 
 test("syncStatus gracefully ignores stale context errors", () => {

@@ -3,8 +3,9 @@
 ## Unreleased
 
 - Block session switches, forks, and tree navigation when subagents are running to prevent stale extension context crashes.
+- Make extension reload and any replacement shutdown wait until running subagents finish or are stopped.
 - Remove session handoff code (`handoffDir`, `drainHandoffs`, `handoffActiveJobs`, `writeHandoffResult`, `startHandoffWatcher`) — no longer needed since session replacement is blocked.
-- Simplify `session_shutdown` to only handle `quit` reason.
+- Keep `session_shutdown` quit handling: abort and persist active subagents as interrupted.
 - Protect TUI widget status sync against stale context errors.
 
 - Execute subagent tasks synchronously by default, returning completed results directly in tool responses to eliminate polling sleep loops and align with multi-tool parallel execution; use `background: true` for asynchronous execution.
