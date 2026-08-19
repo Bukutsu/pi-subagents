@@ -490,16 +490,26 @@ export function registerSubagentModule(
               `${entry.model.provider}/${entry.model.id}` === opts.savedModel,
           );
           if (!savedInScope) {
-            const fallback =
-              scopedList.find(
-                (entry) =>
-                  entry.model.provider === ctx.model?.provider &&
-                  entry.model.id === ctx.model?.id,
-              ) ?? scopedList[0];
-            resolvedModel = fallback.model;
-            resolvedThinking = fallback.thinkingLevel as
-              ThinkingLevel | undefined;
-            modelRequestWarning = `Saved model ${opts.savedModel ?? "unknown"} left the live scope; resumed with ${fallback.model.provider}/${fallback.model.id}`;
+            const parentInScope = scopedList.find(
+              (entry) =>
+                entry.model.provider === ctx.model?.provider &&
+                entry.model.id === ctx.model?.id,
+            );
+            if (parentInScope) {
+              resolvedModel = parentInScope.model;
+              resolvedThinking = parentInScope.thinkingLevel as
+                ThinkingLevel | undefined;
+            } else if (ctx.model) {
+              resolvedModel = ctx.model;
+              resolvedThinking = ctx.thinkingLevel as
+                ThinkingLevel | undefined;
+            } else {
+              const fallback = scopedList[0];
+              resolvedModel = fallback.model;
+              resolvedThinking = fallback.thinkingLevel as
+                ThinkingLevel | undefined;
+            }
+            modelRequestWarning = `Saved model ${opts.savedModel ?? "unknown"} left the live scope; resumed with ${resolvedModel!.provider}/${resolvedModel!.id}`;
           }
         }
         const parentTools = pi.getActiveTools();
@@ -531,11 +541,11 @@ export function registerSubagentModule(
         const requestedThinking = opts.thinking ?? resolvedThinking;
         const scopedEntry =
           !resolvedModel && !existing
-            ? (scopedList?.find(
+            ? scopedList?.find(
                 (s) =>
                   s.model.id === ctx.model?.id &&
                   s.model.provider === ctx.model?.provider,
-              ) ?? scopedList?.[0])
+              )
             : undefined;
         const savedEntry =
           existing && !resolvedModel && opts.savedModel
