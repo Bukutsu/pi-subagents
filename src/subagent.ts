@@ -253,9 +253,8 @@ export function registerSubagentModule(
   pi.registerTool({
     name: "subagent_models",
     label: "Subagent Models",
-    description:
-      "List live models for subagent selection. Use only when model choice matters.",
-    promptSnippet: "List models for subagent selection.",
+    description: "list — live models for subagent selection.",
+    promptSnippet: "list models for subagent selection.",
     parameters: Type.Object({
       offset: Type.Optional(
         Type.Integer({
@@ -338,13 +337,13 @@ export function registerSubagentModule(
     name: "subagent",
     label: "Subagent",
     description:
-      "Delegate work to a child session. Omit model to inherit parent; call subagent_models only if model choice matters.",
-    promptSnippet: "Spawn child session for independent work.",
+      "delegate — child session for independent work. Inherits parent model/tools/cwd.",
+    promptSnippet: "delegate to child session.",
     promptGuidelines: [
-      "Keep simple work in parent; batch independent work ≤2 subagents.",
-      "Include paths, constraints, done-criteria; omit model to inherit parent.",
-      "Use subagent_models only when reasoning/context/cost matters.",
-      "worktree:true for concurrent writes; background:true only if async needed.",
+      "delegate: keep simple work in parent; batch independent work ≤2 subagents.",
+      "isolate: include paths, constraints, and done-criteria; omit model to inherit parent.",
+      "select: reach subagent_models only when reasoning/context/cost matters.",
+      "dispatch: worktree:true for concurrent writes; background:true to return immediately.",
     ],
     prepareArguments(args: unknown) {
       // Legacy callers may still pass tool arrays; the public contract does
@@ -359,23 +358,21 @@ export function registerSubagentModule(
     parameters: Type.Object(
       {
         prompt: Type.String({
-          description:
-            "Task instructions with context, file paths, and completion criteria",
+          description: "Task for child session",
         }),
         model: Type.Optional(
           Type.String({
-            description:
-              "Exact provider/model ID from subagent_models; omit to inherit parent",
+            description: "Exact provider/model ID from subagent_models",
           }),
         ),
         worktree: Type.Optional(
           Type.Boolean({
-            description: "Isolated Git worktree for concurrent writes",
+            description: "Isolated Git worktree",
           }),
         ),
         background: Type.Optional(
           Type.Boolean({
-            description: "Run async without blocking current turn",
+            description: "Return immediately",
           }),
         ),
       },

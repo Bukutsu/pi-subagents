@@ -54,7 +54,7 @@ function truncateText(value: string, maxBytes: number): string {
   if (bytes.byteLength <= maxBytes) return value;
   const suffix = "\n\n… truncated";
   const room = Math.max(0, maxBytes - Buffer.byteLength(suffix));
-  return `${bytes.subarray(0, room).toString("utf8")}${suffix}`;
+  return `${bytes.subarray(bytes.byteLength - room).toString("utf8")}${suffix}`;
 }
 
 function parseCompletionMessage(message: string): unknown {
@@ -85,7 +85,7 @@ function summarizeCompletion(value: unknown): unknown {
 
 function buildBatchMessage(
   items: Array<{ message: string }>,
-  maxBytes = MODEL_OUTPUT_MAX_BYTES,
+  maxBytes = getModelOutputBudget(),
 ): {
   message: string;
   deliveredIndexes: number[];
