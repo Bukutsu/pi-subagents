@@ -38,7 +38,6 @@ import {
   displayText,
   ensurePrivateDir,
   getModelOutputBudget,
-  MODEL_OUTPUT_MAX_BYTES,
   processIsAlive,
   readIndex,
   sanitizeTerminalOutput,
