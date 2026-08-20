@@ -22,6 +22,7 @@ import type {
 import { Markdown, Text } from "@earendil-works/pi-tui";
 import type { Model } from "@earendil-works/pi-ai";
 import {
+  MAX_ACTIVE_SUBAGENTS,
   SUBAGENT_INDEX,
   SUBAGENT_LOCKS,
   SUBAGENT_SESSION_DIR,
@@ -30,15 +31,18 @@ import {
 } from "./types.js";
 
 export const MODEL_OUTPUT_MAX_BYTES = 16 * 1024;
+export const SUBAGENT_RESULT_MAX_BYTES = Math.floor(
+  MODEL_OUTPUT_MAX_BYTES / MAX_ACTIVE_SUBAGENTS,
+);
 export const MODEL_OUTPUT_MAX_LINES = 400;
 
 export function serializeModelJson(
   value: Record<string, unknown>,
   outputKey = "output",
+  maxBytes = MODEL_OUTPUT_MAX_BYTES,
 ) {
   let serialized = JSON.stringify(value);
-  if (Buffer.byteLength(serialized) <= MODEL_OUTPUT_MAX_BYTES)
-    return serialized;
+  if (Buffer.byteLength(serialized) <= maxBytes) return serialized;
 
   const output = value[outputKey];
   if (typeof output === "string") {
@@ -51,7 +55,7 @@ export function serializeModelJson(
         [outputKey]: length ? output.slice(-length) : "",
         outputTruncated: true,
       });
-      if (Buffer.byteLength(candidate) <= MODEL_OUTPUT_MAX_BYTES) low = length;
+      if (Buffer.byteLength(candidate) <= maxBytes) low = length;
       else high = length - 1;
     }
     serialized = JSON.stringify({
@@ -59,8 +63,7 @@ export function serializeModelJson(
       [outputKey]: low ? output.slice(-low) : "",
       outputTruncated: true,
     });
-    if (Buffer.byteLength(serialized) <= MODEL_OUTPUT_MAX_BYTES)
-      return serialized;
+    if (Buffer.byteLength(serialized) <= maxBytes) return serialized;
   }
 
   return JSON.stringify({

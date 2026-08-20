@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import extension from "../index.js";
 import {
   registerSubagentModule,
   resolveCompletion,
@@ -24,6 +25,7 @@ function setup() {
     currentCtx: undefined,
     shuttingDown: false,
     guard() {},
+    canStart: () => true,
     syncStatus() {},
     track: (promise: Promise<void>) => promise,
     trackSetup: () => () => {},
@@ -34,6 +36,20 @@ function setup() {
   registerSubagentModule(pi, manager);
   return { tools, commands, manager };
 }
+
+test("skips child resource-loader initialization", () => {
+  globalThis.__PI_SUBAGENTS_CHILD_RESOURCE_LOAD__ = 1;
+  const registered: string[] = [];
+  try {
+    extension({
+      registerTool: () => registered.push("tool"),
+      registerCommand: () => registered.push("command"),
+    } as any);
+    assert.deepEqual(registered, []);
+  } finally {
+    delete globalThis.__PI_SUBAGENTS_CHILD_RESOURCE_LOAD__;
+  }
+});
 
 test("registers the subagent tool and slash command", async () => {
   const { tools, commands } = setup();
@@ -261,6 +277,18 @@ test("validates subagent parameters", async () => {
         ctx,
       ),
     /Running subagent not found/,
+  );
+
+  await assert.rejects(
+    () =>
+      subagent.execute(
+        "id",
+        { action: "spawn", prompt: "test", context: "fork" },
+        undefined,
+        undefined,
+        ctx,
+      ),
+    /context:fork is no longer supported/,
   );
 });
 

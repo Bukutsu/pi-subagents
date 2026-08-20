@@ -10,6 +10,7 @@ import {
 } from "@earendil-works/pi-tui";
 
 import {
+  MAX_ACTIVE_SUBAGENTS,
   SUBAGENT_DIR,
   SUBAGENT_SESSION_DIR,
   type SubagentJob,
@@ -18,6 +19,7 @@ import {
 
 declare global {
   var __PI_SUBAGENTS_ACTIVE_JOBS__: Map<number, SubagentJob> | undefined;
+  var __PI_SUBAGENTS_PENDING_SETUPS__: Set<AbortController> | undefined;
 }
 
 function getGlobalActiveJobs(): Map<number, SubagentJob> {
@@ -25,6 +27,10 @@ function getGlobalActiveJobs(): Map<number, SubagentJob> {
     number,
     SubagentJob
   >());
+}
+
+function getGlobalPendingSetups(): Set<AbortController> {
+  return (globalThis.__PI_SUBAGENTS_PENDING_SETUPS__ ??= new Set());
 }
 
 import {
@@ -42,9 +48,109 @@ import {
 const BRAILLE = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 const WIDGET_REFRESH_MS = 200;
 
+function truncateText(value: string, maxBytes: number): string {
+  const bytes = Buffer.from(value);
+  if (bytes.byteLength <= maxBytes) return value;
+  const suffix = "\n\n… truncated";
+  const room = Math.max(0, maxBytes - Buffer.byteLength(suffix));
+  return `${bytes.subarray(0, room).toString("utf8")}${suffix}`;
+}
+
+function parseCompletionMessage(message: string): unknown {
+  try {
+    return JSON.parse(message);
+  } catch {
+    return message;
+  }
+}
+
+function summarizeCompletion(value: unknown): unknown {
+  if (typeof value !== "object" || value === null)
+    return { outputTruncated: true };
+  const sessionId =
+    "sessionId" in value && typeof value.sessionId === "string"
+      ? value.sessionId
+      : undefined;
+  const state =
+    "state" in value && typeof value.state === "string"
+      ? value.state
+      : undefined;
+  return {
+    ...(sessionId ? { sessionId } : {}),
+    ...(state ? { state } : {}),
+    outputTruncated: true,
+  };
+}
+
+function buildBatchMessage(items: Array<{ message: string }>): {
+  message: string;
+  deliveredIndexes: number[];
+  omittedIndexes: number[];
+} {
+  const results: unknown[] = [];
+  const deliveredIndexes: number[] = [];
+  const omittedIndexes: number[] = [];
+  for (const [index, item] of items.entries()) {
+    const value = parseCompletionMessage(item.message);
+    const candidate = {
+      v: 1,
+      type: "subagent",
+      event: "batch",
+      results: [...results, value],
+    };
+    if (
+      Buffer.byteLength(JSON.stringify(candidate)) <= MODEL_OUTPUT_MAX_BYTES
+    ) {
+      results.push(value);
+      deliveredIndexes.push(index);
+      continue;
+    }
+    const summary = summarizeCompletion(value);
+    const summarizedCandidate = {
+      ...candidate,
+      results: [...results, summary],
+    };
+    if (
+      Buffer.byteLength(JSON.stringify(summarizedCandidate)) <=
+      MODEL_OUTPUT_MAX_BYTES
+    ) {
+      results.push(summary);
+      deliveredIndexes.push(index);
+    } else omittedIndexes.push(index);
+  }
+
+  const encode = () =>
+    JSON.stringify({
+      v: 1,
+      type: "subagent",
+      event: "batch",
+      results,
+      ...(omittedIndexes.length ? { omitted: omittedIndexes.length } : {}),
+    });
+  let message = encode();
+  while (
+    Buffer.byteLength(message) > MODEL_OUTPUT_MAX_BYTES &&
+    deliveredIndexes.length > 0
+  ) {
+    results.pop();
+    const index = deliveredIndexes.pop();
+    if (index !== undefined) omittedIndexes.push(index);
+    message = encode();
+  }
+  return { message, deliveredIndexes, omittedIndexes };
+}
+
 export class SubagentManager {
   public jobs: Map<number, SubagentJob> = getGlobalActiveJobs();
   public nextVirtualPid = 1;
+
+  public activeCount(): number {
+    return this.jobs.size + this.pendingSetups.size;
+  }
+
+  public canStart(): boolean {
+    return this.activeCount() < MAX_ACTIVE_SUBAGENTS;
+  }
 
   public getNextPid(): number {
     let max = 0;
@@ -60,7 +166,7 @@ export class SubagentManager {
   public pending = new Set<Promise<unknown>>();
   private deliveredCompletionIds = new Set<string>();
   private inFlightCompletionIds = new Set<string>();
-  private pendingSetups = new Set<AbortController>();
+  private pendingSetups: Set<AbortController> = getGlobalPendingSetups();
   private widgetTimer: ReturnType<typeof setInterval> | undefined;
   private pendingCompletions: Array<{
     message: string;
@@ -140,9 +246,9 @@ export class SubagentManager {
   private registerLifecycleEvents() {
     // Block session replacement when subagents are running.
     this.pi.on("session_before_switch", (_event, ctx) => {
-      if (this.jobs.size > 0) {
+      if (this.activeCount() > 0) {
         ctx.ui.notify(
-          `Cannot switch sessions while ${this.jobs.size} subagent${this.jobs.size === 1 ? "" : "s"} running. Stop them with /subagent first.`,
+          `Cannot switch sessions while ${this.activeCount()} subagent${this.activeCount() === 1 ? "" : "s"} running. Stop them with /subagent first.`,
           "error",
         );
         return { cancel: true };
@@ -150,9 +256,9 @@ export class SubagentManager {
     });
 
     this.pi.on("session_before_fork", (_event, ctx) => {
-      if (this.jobs.size > 0) {
+      if (this.activeCount() > 0) {
         ctx.ui.notify(
-          `Cannot fork session while ${this.jobs.size} subagent${this.jobs.size === 1 ? "" : "s"} running. Stop them with /subagent first.`,
+          `Cannot fork session while ${this.activeCount()} subagent${this.activeCount() === 1 ? "" : "s"} running. Stop them with /subagent first.`,
           "error",
         );
         return { cancel: true };
@@ -160,9 +266,9 @@ export class SubagentManager {
     });
 
     this.pi.on("session_before_tree", (_event, ctx) => {
-      if (this.jobs.size > 0) {
+      if (this.activeCount() > 0) {
         ctx.ui.notify(
-          `Cannot navigate session tree while ${this.jobs.size} subagent${this.jobs.size === 1 ? "" : "s"} running. Stop them with /subagent first.`,
+          `Cannot navigate session tree while ${this.activeCount()} subagent${this.activeCount() === 1 ? "" : "s"} running. Stop them with /subagent first.`,
           "error",
         );
         return { cancel: true };
@@ -182,6 +288,10 @@ export class SubagentManager {
       this.syncStatus(ctx);
     });
 
+    this.pi.on("agent_settled", (_event, ctx) => {
+      this.flushPendingCompletions(ctx);
+    });
+
     this.pi.on("message_end", (event) => {
       if (event.message.role !== "custom") return;
       const ids = (
@@ -197,14 +307,14 @@ export class SubagentManager {
 
     this.pi.on("session_shutdown", async (event, ctx) => {
       if (event.reason !== "quit") {
-        if (this.jobs.size > 0) {
+        if (this.activeCount() > 0) {
           const action =
             event.reason === "reload" ? "Reload" : "Session replacement";
           ctx.ui.notify(
-            `${action} is waiting for ${this.jobs.size} running subagent${this.jobs.size === 1 ? "" : "s"}. Stop them with /subagent or wait for them to finish.`,
+            `${action} is waiting for ${this.activeCount()} running subagent${this.activeCount() === 1 ? "" : "s"}. Stop them with /subagent or wait for them to finish.`,
             "info",
           );
-          while (this.jobs.size > 0) {
+          while (this.activeCount() > 0) {
             await new Promise((resolve) => setTimeout(resolve, 100));
           }
         }
@@ -474,65 +584,41 @@ export class SubagentManager {
         byOrigin.set(item.originLeafId, group);
       }
       for (const group of byOrigin.values()) {
-        let chunk: typeof items = [];
-        const flushChunk = () => {
-          if (!chunk.length) return;
-          const results = chunk.map((item) => {
-            try {
-              return JSON.parse(item.message);
-            } catch {
-              return item.message;
-            }
-          });
-          batches.push({
-            ...chunk[0],
-            completion: completionMode,
-            message:
-              chunk.length === 1
-                ? chunk[0].message
-                : JSON.stringify({
-                    v: 1,
-                    type: "subagent",
-                    event: "batch",
-                    results,
-                  }),
-            displayMessage: chunk
-              .map((item) => item.displayMessage ?? item.message)
+        const first = group[0];
+        if (!first) continue;
+        const built =
+          group.length === 1
+            ? {
+                message: first.message,
+                deliveredIndexes: [0],
+                omittedIndexes: [] as number[],
+              }
+            : buildBatchMessage(group);
+        const deliveredItems = built.deliveredIndexes.map(
+          (index) => group[index],
+        );
+        const omittedItems = built.omittedIndexes.map((index) => group[index]);
+        this.pendingCompletions.push(...omittedItems);
+        batches.push({
+          ...first,
+          completion: completionMode,
+          message: built.message,
+          displayMessage: truncateText(
+            deliveredItems
+              .map((item) => item?.displayMessage ?? item?.message ?? "")
               .join("\n\n"),
-            completionId: undefined,
-            details: {
-              count: chunk.length,
-              completionIds: chunk.flatMap((entry) =>
-                entry.completionId ? [entry.completionId] : [],
-              ),
-            },
-            batchedItems: chunk,
-          });
-          chunk = [];
-        };
-        for (const item of group) {
-          const candidate = [...chunk, item].map((entry) => {
-            try {
-              return JSON.parse(entry.message);
-            } catch {
-              return entry.message;
-            }
-          });
-          if (
-            chunk.length &&
-            Buffer.byteLength(
-              JSON.stringify({
-                v: 1,
-                type: "subagent",
-                event: "batch",
-                results: candidate,
-              }),
-            ) > MODEL_OUTPUT_MAX_BYTES
-          )
-            flushChunk();
-          chunk.push(item);
-        }
-        flushChunk();
+            MODEL_OUTPUT_MAX_BYTES,
+          ),
+          completionId: undefined,
+          details: {
+            count: deliveredItems.length,
+            ...(omittedItems.length ? { omitted: omittedItems.length } : {}),
+            completionIds: deliveredItems.flatMap((entry) =>
+              entry?.completionId ? [entry.completionId] : [],
+            ),
+          },
+          batchedItems: deliveredItems,
+        });
       }
       return batches;
     };
@@ -665,6 +751,10 @@ export class SubagentManager {
   }
 
   public trackSetup(controller: AbortController) {
+    if (!this.canStart())
+      throw new Error(
+        `Subagent limit reached: at most ${MAX_ACTIVE_SUBAGENTS} active subagents`,
+      );
     this.pendingSetups.add(controller);
     return () => this.pendingSetups.delete(controller);
   }

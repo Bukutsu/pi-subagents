@@ -19,8 +19,9 @@ When working on complex projects, you often need to run independent tasks in par
 
 1. **Zero configuration**: The child session automatically inherits your active model, thinking budget, active tools, and working directory.
 2. **In-process & fast**: No Docker containers or background daemons. Children run as lightweight Pi agent sessions inside the same process.
-3. **Synchronous by default**: Subagents block and return their full output directly in the tool response. Multiple subagents called in the same turn execute concurrently in parallel.
-4. **Survives session reloads**: If you run `/reload`, `/new`, or `/resume`, running subagents keep executing in the background and hand their results over to the new session when finished.
+3. **Synchronous by default**: Subagents block and return their full output directly in the tool response. At most two children can be active at once.
+4. **Bounded results**: Child results are capped at 8 KB each, and batched completions are capped at 16 KB to keep parent context growth predictable.
+5. **Session replacement is coordinated**: `/reload`, `/new`, `/resume`, and tree navigation wait while subagents are running. Stop them with `/subagent kill all` when replacement must happen immediately.
 
 ## Install
 

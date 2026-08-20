@@ -49,6 +49,7 @@ import {
   isSubagentRecord,
   MODEL_OUTPUT_MAX_BYTES,
   MODEL_OUTPUT_MAX_LINES,
+  SUBAGENT_RESULT_MAX_BYTES,
   readIndex,
   renderToolResult,
   resolveSubagentCwd,
@@ -119,6 +120,35 @@ export function registerSubagentModule(
   manager: SubagentManager,
 ) {
   let modelRuntime: Promise<ModelRuntime> | undefined;
+  const runtimeRefreshes = new WeakMap<
+    ModelRuntime,
+    { refreshedAt: number; promise?: Promise<void> }
+  >();
+  const RUNTIME_REFRESH_TTL_MS = 5_000;
+
+  function refreshRuntime(runtime: ModelRuntime, force = false): Promise<void> {
+    if (typeof runtime.refresh !== "function") return Promise.resolve();
+    const now = Date.now();
+    const state = runtimeRefreshes.get(runtime) ?? { refreshedAt: 0 };
+    if (state.promise) return state.promise;
+    if (!force && now - state.refreshedAt < RUNTIME_REFRESH_TTL_MS)
+      return Promise.resolve();
+
+    let promise: Promise<void>;
+    promise = Promise.resolve()
+      .then(async () => {
+        const result = await runtime.refresh({ allowNetwork: false });
+        if (!result || !result.errors || result.errors.size === 0)
+          state.refreshedAt = Date.now();
+      })
+      .catch(() => {})
+      .finally(() => {
+        if (state.promise === promise) state.promise = undefined;
+      });
+    state.promise = promise;
+    runtimeRefreshes.set(runtime, state);
+    return promise;
+  }
 
   function statusDetails(record: SubagentRecord, job?: SubagentJob) {
     const current = job ? manager.currentRecord(job) : record;
@@ -178,12 +208,12 @@ export function registerSubagentModule(
 
   function listSubagentModels(ctx: ExtensionContext, offset = 0) {
     const candidates = getSubagentModelCandidates(ctx);
-    const allModels = candidates.map((candidate) =>
+    const page = candidates.slice(offset, offset + MAX_LIST_ITEMS);
+    const models = page.map((candidate) =>
       describeSubagentModel(candidate, ctx.model),
     );
-    const models = allModels.slice(offset, offset + MAX_LIST_ITEMS);
     const nextOffset =
-      offset + models.length < allModels.length
+      offset + models.length < candidates.length
         ? offset + models.length
         : undefined;
     const unrestricted = getScopedModels(ctx).length === 0;
@@ -207,7 +237,7 @@ export function registerSubagentModule(
               : undefined,
             models,
             ...(nextOffset !== undefined ? { nextOffset } : {}),
-            total: allModels.length,
+            total: candidates.length,
           }),
         },
       ],
@@ -215,7 +245,7 @@ export function registerSubagentModule(
         models,
         unrestricted,
         nextOffset,
-        total: allModels.length,
+        total: candidates.length,
         displayText: display,
       },
     };
@@ -314,6 +344,7 @@ export function registerSubagentModule(
     promptSnippet:
       "Delegate self-contained work to a child session; inherit the current model unless a better live candidate is needed.",
     promptGuidelines: [
+      "Keep simple work in the parent; use at most two active subagents for one task and only split independent work.",
       "Use subagent for self-contained work and include the exact paths, constraints, and completion criteria the child needs.",
       "Omit model for ordinary delegation so the child inherits the current parent model.",
       "Call subagent_models only when reasoning quality, context size, cost, or input modality makes model choice material; then pass an exact returned model ID.",
@@ -377,8 +408,13 @@ export function registerSubagentModule(
       } = args;
       manager.currentCtx = ctx;
       const originLeafId = ctx.sessionManager.getLeafId();
-      const configuredScope = [...getScopedModels(ctx)];
-      const availableModels = ctx.modelRegistry.getAvailable();
+      const needsModelResolution = action === "spawn";
+      const configuredScope = needsModelResolution
+        ? [...getScopedModels(ctx)]
+        : [];
+      const availableModels = needsModelResolution
+        ? ctx.modelRegistry.getAvailable()
+        : [];
       const availableIds = new Set(
         availableModels.map(
           (candidate) => `${candidate.provider}/${candidate.id}`,
@@ -388,7 +424,9 @@ export function registerSubagentModule(
       const scopedModels = configuredScope.filter((entry) =>
         availableIds.has(`${entry.model.provider}/${entry.model.id}`),
       );
-      const selectionCandidates = getSubagentModelCandidates(ctx);
+      const selectionCandidates = needsModelResolution
+        ? getSubagentModelCandidates(ctx)
+        : [];
       const requestedId = sessionId?.trim();
       let durableCache: Record<string, SubagentRecord> | undefined;
       const getDurable = () => (durableCache ??= readIndex());
@@ -453,6 +491,7 @@ export function registerSubagentModule(
         const parentRuntime = (ctx.modelRegistry as any)?.runtime as
           ModelRuntime | undefined;
         let runtime: ModelRuntime;
+        let registeredProvider = false;
         if (parentRuntime) {
           runtime = parentRuntime;
         } else {
@@ -473,20 +512,27 @@ export function registerSubagentModule(
                 ctx.modelRegistry.getRegisteredNativeProvider?.(providerId);
               const config =
                 ctx.modelRegistry.getRegisteredProviderConfig?.(providerId);
+              const alreadyRegistered =
+                typeof runtime.getProvider === "function" &&
+                Boolean(runtime.getProvider(providerId));
+              if (alreadyRegistered) continue;
               if (
                 native &&
                 typeof runtime.registerNativeProvider === "function"
               ) {
                 runtime.registerNativeProvider(native);
+                registeredProvider = true;
               } else if (
                 config &&
                 typeof runtime.registerProvider === "function"
               ) {
                 runtime.registerProvider(providerId, config);
+                registeredProvider = true;
               } else if (typeof runtime.registerNativeProvider === "function") {
                 const provider = ctx.modelRegistry.getProvider?.(providerId);
                 if (provider) {
                   runtime.registerNativeProvider(provider);
+                  registeredProvider = true;
                 }
               }
             } catch (providerError) {
@@ -497,11 +543,8 @@ export function registerSubagentModule(
             }
           }
         }
-        if (typeof runtime.refresh === "function") {
-          try {
-            await runtime.refresh({ allowNetwork: false });
-          } catch {}
-        }
+        if (registeredProvider || !parentRuntime)
+          await refreshRuntime(runtime, true);
         const modelSpec = opts.model?.trim();
         let resolvedModel: Model<any> | undefined;
         let resolvedThinking: ThinkingLevel | undefined;
@@ -609,6 +652,8 @@ export function registerSubagentModule(
         const explicitTools = requestedTools?.length
           ? requestedTools
           : undefined;
+        const childTools =
+          explicitTools ?? parentTools.filter((name) => name !== "subagent");
         const temporaryExtensionPaths = [
           ...new Set(
             pi
@@ -778,7 +823,17 @@ export function registerSubagentModule(
           // project skills, prompts, or themes into an untrusted child.
           resourceLoader.extendResources = () => {};
         }
-        await resourceLoader.reload();
+        globalThis.__PI_SUBAGENTS_CHILD_RESOURCE_LOAD__ =
+          (globalThis.__PI_SUBAGENTS_CHILD_RESOURCE_LOAD__ ?? 0) + 1;
+        try {
+          await resourceLoader.reload();
+        } finally {
+          const loads =
+            (globalThis.__PI_SUBAGENTS_CHILD_RESOURCE_LOAD__ ?? 1) - 1;
+          if (loads > 0)
+            globalThis.__PI_SUBAGENTS_CHILD_RESOURCE_LOAD__ = loads;
+          else delete globalThis.__PI_SUBAGENTS_CHILD_RESOURCE_LOAD__;
+        }
         checkSetup?.();
         const setupController = new AbortController();
         let created: Awaited<ReturnType<typeof createAgentSession>> | undefined;
@@ -797,7 +852,7 @@ export function registerSubagentModule(
                 : undefined,
             },
             ...(resourceLoader ? { resourceLoader } : {}),
-            ...(explicitTools ? { tools: explicitTools } : {}),
+            tools: childTools,
             ...(selectedModel ? { model: selectedModel } : {}),
             ...(!existing
               ? { thinkingLevel: effectiveThinking as ThinkingLevel }
@@ -913,11 +968,7 @@ export function registerSubagentModule(
               console.warn(`Subagent extension error: ${error.error}`),
           });
           checkSetup?.();
-          if (typeof runtime.refresh === "function") {
-            try {
-              await runtime.refresh({ allowNetwork: false });
-            } catch {}
-          }
+          await refreshRuntime(runtime, true);
           if (setupController.signal.aborted)
             throw new Error(
               "Subagent extension requested shutdown during setup",
@@ -985,12 +1036,9 @@ export function registerSubagentModule(
       };
 
       if (action === "models") {
-        const parentRuntime = (ctx.modelRegistry as any)?.runtime;
-        if (parentRuntime && typeof parentRuntime.refresh === "function") {
-          try {
-            await parentRuntime.refresh({ allowNetwork: false });
-          } catch {}
-        }
+        const parentRuntime = (ctx.modelRegistry as any)?.runtime as
+          ModelRuntime | undefined;
+        if (parentRuntime) await refreshRuntime(parentRuntime);
         return listSubagentModels(ctx, Math.max(0, modelOffset));
       }
       if (action === "status") {
@@ -1148,9 +1196,9 @@ export function registerSubagentModule(
         throw new Error(
           "worktree:true is only valid for a new subagent session",
         );
-      if (requestedId && context === "fork")
+      if (context === "fork")
         throw new Error(
-          "context:fork is only valid for a new subagent session",
+          "context:fork is no longer supported; use the default project context",
         );
       const releaseSetup = manager.trackSetup(setupController);
       let setupReleased = false;
@@ -1160,9 +1208,6 @@ export function registerSubagentModule(
           releaseSetup();
         }
       };
-      if (context === "fork") {
-        checkSetup();
-      }
       let finishSetup!: () => void;
       manager.track(
         new Promise<void>((resolve) => {
@@ -1329,17 +1374,9 @@ export function registerSubagentModule(
                 SUBAGENT_SESSION_DIR,
                 childCwd,
               )
-            : context === "fork" &&
-                parentSessionFile &&
-                existsSync(parentSessionFile)
-              ? SessionManager.forkFrom(
-                  parentSessionFile,
-                  childCwd,
-                  SUBAGENT_SESSION_DIR,
-                )
-              : SessionManager.create(childCwd, SUBAGENT_SESSION_DIR, {
-                  parentSession: parentSessionFile,
-                });
+            : SessionManager.create(childCwd, SUBAGENT_SESSION_DIR, {
+                parentSession: parentSessionFile,
+              });
           const actualSessionId = sessionManager.getSessionId();
           if (existing && actualSessionId !== existing.sessionId) {
             throw new Error(
@@ -1354,9 +1391,6 @@ export function registerSubagentModule(
         }
         let prepared: Awaited<ReturnType<typeof setupChildSession>> | undefined;
         try {
-          const savedContext = existing
-            ? sessionManager.buildSessionContext()
-            : undefined;
           prepared = await setupChildSession({
             cwd: childCwd,
             model,
@@ -1364,10 +1398,8 @@ export function registerSubagentModule(
             tools,
             sessionManager,
             existing: Boolean(existing),
-            savedModel: savedContext?.model
-              ? `${savedContext.model.provider}/${savedContext.model.modelId}`
-              : existing?.model,
-            savedThinking: savedContext?.thinkingLevel,
+            savedModel: existing?.model,
+            savedThinking: existing?.thinking,
             checkSetup,
             setupSignal,
             shutdownHandler: () => controller.abort(),
@@ -1406,11 +1438,6 @@ export function registerSubagentModule(
             sessionManager.appendCustomEntry("pi-subagents", {
               createdAt: new Date().toISOString(),
             });
-            if (context === "fork")
-              sessionManager.appendModelChange(
-                session.model.provider,
-                session.model.id,
-              );
           }
         } catch (error) {
           await disposeChild();
@@ -1679,7 +1706,7 @@ export function registerSubagentModule(
           let reason = thrown ?? assistant?.errorMessage;
           const rawText = extractTextContent(assistant?.content).trim();
           const truncated = truncateTail(rawText, {
-            maxBytes: MODEL_OUTPUT_MAX_BYTES,
+            maxBytes: SUBAGENT_RESULT_MAX_BYTES,
             maxLines: MODEL_OUTPUT_MAX_LINES,
           });
           let truncationNote = "";
@@ -1753,22 +1780,26 @@ export function registerSubagentModule(
             usage: completedRecord.usage,
             logPath: retainedLogFile,
           });
-          const compact = serializeModelJson({
-            v: 1,
-            type: "subagent",
-            event: "complete",
-            sessionId: session.sessionId,
-            state,
-            ...(truncated.content ? { output: truncated.content } : {}),
-            ...(reason ? { reason: sanitizeTerminalOutput(reason) } : {}),
-            ...(truncated.truncated ? { outputTruncated: true } : {}),
-            ...(retainedLogFile ? { logPath: retainedLogFile } : {}),
-            durationSec: completedRecord.durationSec ?? 0,
-            turns: completedRecord.turns,
-            toolCount: completedRecord.toolCount,
-            toolFailures: completedRecord.toolFailures,
-            ...(usage.cost ? { cost: usage.cost } : {}),
-          });
+          const compact = serializeModelJson(
+            {
+              v: 1,
+              type: "subagent",
+              event: "complete",
+              sessionId: session.sessionId,
+              state,
+              ...(truncated.content ? { output: truncated.content } : {}),
+              ...(reason ? { reason: sanitizeTerminalOutput(reason) } : {}),
+              ...(truncated.truncated ? { outputTruncated: true } : {}),
+              ...(retainedLogFile ? { logPath: retainedLogFile } : {}),
+              durationSec: completedRecord.durationSec ?? 0,
+              turns: completedRecord.turns,
+              toolCount: completedRecord.toolCount,
+              toolFailures: completedRecord.toolFailures,
+              ...(usage.cost ? { cost: usage.cost } : {}),
+            },
+            "output",
+            SUBAGENT_RESULT_MAX_BYTES,
+          );
           const display = `${header}${mainContent}${truncationNote}${reasonText}${recovery}${fallback}${badge}`;
           const completionDetails = {
             sessionId: session.sessionId,

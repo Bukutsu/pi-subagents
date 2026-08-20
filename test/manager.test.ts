@@ -2,6 +2,39 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { SubagentManager } from "../src/manager.js";
 
+test("limits active jobs and setup to two subagents", () => {
+  const manager = new SubagentManager({} as any);
+  assert.equal(manager.activeCount(), 0);
+  assert.equal(manager.canStart(), true);
+
+  const releaseSetup = manager.trackSetup(new AbortController());
+  assert.equal(manager.activeCount(), 1);
+  manager.jobs.set(1, {} as any);
+  assert.equal(manager.activeCount(), 2);
+  assert.equal(manager.canStart(), false);
+
+  releaseSetup();
+  manager.jobs.delete(1);
+  assert.equal(manager.canStart(), true);
+});
+
+test("shares setup reservations across manager instances", () => {
+  const first = new SubagentManager({} as any);
+  const second = new SubagentManager({} as any);
+  const releaseFirst = first.trackSetup(new AbortController());
+  const releaseSecond = second.trackSetup(new AbortController());
+
+  assert.equal(first.activeCount(), 2);
+  assert.equal(second.canStart(), false);
+  assert.throws(
+    () => second.trackSetup(new AbortController()),
+    /at most 2 active subagents/,
+  );
+
+  releaseFirst();
+  releaseSecond();
+});
+
 test("keeps results until the origin branch is active", () => {
   const messages: unknown[] = [];
   const manager = new SubagentManager({
@@ -116,12 +149,13 @@ test("keeps queued batches separated by origin and byte budget", () => {
   idle = true;
   (manager as any).flushPendingCompletions(ctx);
 
-  assert.equal(messages.length, 3);
+  assert.equal(messages.length, 2);
   assert.ok(
     messages.every(
       (message) => Buffer.byteLength(message.content) <= 16 * 1024,
     ),
   );
+  assert.equal(JSON.parse(messages[0].content).event, "batch");
 });
 
 test("deduplicates completion delivery by invocation", () => {
@@ -171,15 +205,12 @@ test("marks stopped subagents while cancellation is in progress", () => {
 test("killAllJobs aborts active subagents and pending setup", () => {
   const manager = new SubagentManager({} as any);
   const first = new AbortController();
-  const second = new AbortController();
   const setup = new AbortController();
   manager.jobs.set(1, { controller: first } as any);
-  manager.jobs.set(2, { controller: second } as any);
   const release = manager.trackSetup(setup);
 
-  assert.equal(manager.killAllJobs(), 3);
+  assert.equal(manager.killAllJobs(), 2);
   assert.equal(first.signal.aborted, true);
-  assert.equal(second.signal.aborted, true);
   assert.equal(setup.signal.aborted, true);
   assert.equal(manager.killAllJobs(), 0);
 
@@ -205,6 +236,35 @@ test("emits subagent:stop event on pi.events when killing a job", () => {
   assert.equal(events[0].name, "subagent:stop");
   assert.equal(events[0].data.pid, 1);
   assert.equal(events[0].data.sessionId, "test-session-123");
+});
+
+test("flushes queued completions when the parent agent settles", async () => {
+  const handlers = new Map<string, (event: unknown, ctx: any) => unknown>();
+  const messages: unknown[] = [];
+  const manager = new SubagentManager({
+    registerMessageRenderer: () => {},
+    on: (event: string, handler: (event: unknown, ctx: any) => unknown) =>
+      handlers.set(event, handler),
+    sendMessage: (message: unknown) => messages.push(message),
+  } as any);
+  manager.init();
+  manager.shuttingDown = false;
+  manager.generation = 1;
+  let idle = false;
+  const ctx: any = {
+    isIdle: () => idle,
+    sessionManager: {
+      getLeafId: () => "leaf-1",
+      getBranch: () => [{ id: "leaf-1" }],
+    },
+  };
+  manager.currentCtx = ctx;
+
+  manager.deliverCompletion("queued", "queue", 1, "leaf-1");
+  assert.equal(messages.length, 0);
+  idle = true;
+  await handlers.get("agent_settled")!(undefined, ctx);
+  assert.equal(messages.length, 1);
 });
 
 test("passes triggerTurn: false when delivering follow-up queue completions during active turns", () => {

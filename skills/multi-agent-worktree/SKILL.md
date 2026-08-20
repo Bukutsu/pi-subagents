@@ -9,9 +9,10 @@ Reference and workflows for parallel coding, speculative exploration, and isolat
 
 ## Rules
 
-- **Worktree gating**: Use `worktree: true` when subagents write code or run mutating commands. Omit `worktree` (default `false`) for read-only tasks (audits, research, reviews) to avoid worktree lifecycle overhead.
+- **Delegation budget**: Use no more than two active subagents for one task. Use fewer when the work is simple or the slices overlap.
+- **Worktree gating**: Use `worktree: true` when subagents write code concurrently or need mutation isolation. Omit `worktree` (default `false`) for read-only tasks (audits, research, reviews) and sequential in-place work.
 - **Harness isolation**: Dispatch via `subagent({ prompt, worktree: true })`. Pi manages worktree creation and lifecycle outside the working tree.
-- **Clean working tree**: Verify `git status --porcelain` is clean before spawning worktrees. Commit or stash parent changes first.
+- **Clean working tree**: `createWorktree` checks `git status --porcelain` before creation. Commit or stash parent changes first when the check fails.
 - **Branch lifecycle**: Subagents execute on private branch `pi-subagents/<timestamp>-<id>`. Inspect diffs, merge desired changes, and delete the temporary branch upon completion.
 - **Prompt self-containment**: Pass untracked configuration (`.env` files), ephemeral ports (`PORT=0`), and baseline verification directly in the child prompt; worktrees only inherit committed `HEAD`.
 
@@ -23,13 +24,12 @@ Reference and workflows for parallel coding, speculative exploration, and isolat
 
 Use when splitting work across distinct files or subsystems that do not conflict.
 
-1. **Verify clean tree**: Run `git status --porcelain` to confirm zero uncommitted changes.
-2. **Dispatch in parallel**: Call `subagent` for each disjoint module in a single turn with `worktree: true`:
+1. **Dispatch in parallel**: Call `subagent` for each disjoint module in a single turn with `worktree: true`:
    - Subagent 1: `subagent({ prompt: "Implement frontend component in src/ui/...", worktree: true })`
    - Subagent 2: `subagent({ prompt: "Implement backend endpoint in src/api/...", worktree: true })`
-3. **Inspect each branch**: When a subagent completes, run `git diff HEAD..<branch>` to review changes.
-4. **Merge and clean**: Merge with `git merge --no-ff <branch> -m "Integrate <component>"` and delete the temporary branch with `git branch -D <branch>`. Repeat for each child branch.
-5. **Completion verification**: Run the full project test suite and typechecks in the parent workspace to confirm clean integration with zero regressions.
+2. **Inspect each branch**: When a subagent completes, run `git diff HEAD..<branch>` to review changes.
+3. **Merge and clean**: Merge with `git merge --no-ff <branch> -m "Integrate <component>"` and delete the temporary branch with `git branch -D <branch>`. Repeat for each child branch.
+4. **Completion verification**: Run the full project test suite and typechecks in the parent workspace to confirm clean integration with zero regressions.
 
 ---
 
@@ -37,7 +37,7 @@ Use when splitting work across distinct files or subsystems that do not conflict
 
 Use when testing multiple distinct approaches to a complex problem or bug.
 
-1. **Dispatch competing candidates**: Call multiple `subagent` tasks in parallel with `worktree: true`, each specifying a different implementation approach:
+1. **Dispatch at most two competing candidates**: Call multiple `subagent` tasks in parallel with `worktree: true`, each specifying a different implementation approach:
    - Candidate A: `subagent({ prompt: "Approach A: Refactor parser using AST visitor...", worktree: true })`
    - Candidate B: `subagent({ prompt: "Approach B: Refactor parser using regex state machine...", worktree: true })`
 2. **Evaluate solutions**: Compare candidate branches using `git diff HEAD..<branch-A>` and `git diff HEAD..<branch-B>`, checking test pass rates and implementation simplicity.

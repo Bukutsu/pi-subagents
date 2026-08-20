@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Cap active subagents at two, bound child/batched result output, flush queued completions when the parent settles, and coalesce model-runtime refreshes.
+- Remove the unbounded legacy `context:fork` spawn path; use the default project context instead.
+- Add a 100 MB aggregate cap to retained output logs.
 - Add live `subagent_models` discovery and optional exact model selection; children inherit the parent’s current model by default.
 - Block session switches, forks, and tree navigation when subagents are running to prevent stale extension context crashes.
 - Make extension reload and any replacement shutdown wait until running subagents finish or are stopped.
@@ -25,12 +28,10 @@
 - Fix model fallback on subagent resume in unrestricted mode when saved model is unavailable.
 - Update devDependencies and peer compatibility to `@earendil-works/pi-coding-agent` v0.84.2.
 - Render subagent output with pi's native markdown theme (syntax-highlighted code blocks and theme-customizable markdown colors).
-- Keep children running across session replacement (`/reload`, `/new`,
-  `/resume`, `/fork`, `/clone`); results are handed to the next runtime of the
-  origin session (matched by session id or file path), restored children show
-  as "finishing (session reload)", and steering them is deferred until they
-  settle. Retained output logs now live in
-  `<agent-dir>/pi-subagents/logs` (newest 50 kept).
+- Coordinate session replacement while children run: `/reload`, `/new`,
+  `/resume`, `/fork`, and `/clone` wait for children to finish or be stopped.
+  Retained output logs live in `<agent-dir>/pi-subagents/logs` with a 100 MB
+  aggregate cap and newest-first retention.
 
 - Query the live, available session model scope with paginated `action:models`; do not cache unsaved scope edits.
 - Resume atomically on a current scoped fallback and persist effective model/thinking changes.

@@ -4,12 +4,20 @@ import type {
 } from "@earendil-works/pi-coding-agent";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import { randomUUID } from "node:crypto";
-import { mkdirSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import {
+  mkdirSync,
+  readdirSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
 import { join } from "node:path";
 
+export const MAX_ACTIVE_SUBAGENTS = 2;
 export const SUBAGENT_DIR = join(getAgentDir(), "pi-subagents");
 export const LOG_DIR = join(SUBAGENT_DIR, "logs");
 const MAX_RETAINED_LOGS = 50;
+const MAX_RETAINED_LOG_BYTES = 100 * 1024 * 1024;
 export const SUBAGENT_SESSION_DIR = join(SUBAGENT_DIR, "sessions");
 export const SUBAGENT_INDEX = join(SUBAGENT_DIR, "index");
 export const SUBAGENT_LOCKS = join(SUBAGENT_DIR, "locks");
@@ -97,11 +105,29 @@ export function retainLog(content: string | Uint8Array) {
     const logs = readdirSync(LOG_DIR)
       .filter((name) => name.endsWith(".log"))
       .sort();
-    for (const name of logs.slice(
-      0,
-      Math.max(0, logs.length - MAX_RETAINED_LOGS),
-    ))
-      rmSync(join(LOG_DIR, name), { force: true });
+    let retainedCount = 0;
+    let retainedBytes = 0;
+    const remove: string[] = [];
+    for (const name of logs.reverse()) {
+      const path = join(LOG_DIR, name);
+      let size = 0;
+      try {
+        size = statSync(path).size;
+      } catch {
+        remove.push(name);
+        continue;
+      }
+      if (
+        retainedCount >= MAX_RETAINED_LOGS ||
+        retainedBytes + size > MAX_RETAINED_LOG_BYTES
+      ) {
+        remove.push(name);
+        continue;
+      }
+      retainedCount++;
+      retainedBytes += size;
+    }
+    for (const name of remove) rmSync(join(LOG_DIR, name), { force: true });
     return path;
   } catch (error) {
     console.warn("Could not retain subagent output log:", error);
