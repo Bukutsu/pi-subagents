@@ -37,6 +37,7 @@ import {
   createMarkdownComponent,
   displayText,
   ensurePrivateDir,
+  getModelOutputBudget,
   MODEL_OUTPUT_MAX_BYTES,
   processIsAlive,
   readIndex,
@@ -82,7 +83,10 @@ function summarizeCompletion(value: unknown): unknown {
   };
 }
 
-function buildBatchMessage(items: Array<{ message: string }>): {
+function buildBatchMessage(
+  items: Array<{ message: string }>,
+  maxBytes = MODEL_OUTPUT_MAX_BYTES,
+): {
   message: string;
   deliveredIndexes: number[];
   omittedIndexes: number[];
@@ -98,9 +102,7 @@ function buildBatchMessage(items: Array<{ message: string }>): {
       event: "batch",
       results: [...results, value],
     };
-    if (
-      Buffer.byteLength(JSON.stringify(candidate)) <= MODEL_OUTPUT_MAX_BYTES
-    ) {
+    if (Buffer.byteLength(JSON.stringify(candidate)) <= maxBytes) {
       results.push(value);
       deliveredIndexes.push(index);
       continue;
@@ -110,10 +112,7 @@ function buildBatchMessage(items: Array<{ message: string }>): {
       ...candidate,
       results: [...results, summary],
     };
-    if (
-      Buffer.byteLength(JSON.stringify(summarizedCandidate)) <=
-      MODEL_OUTPUT_MAX_BYTES
-    ) {
+    if (Buffer.byteLength(JSON.stringify(summarizedCandidate)) <= maxBytes) {
       results.push(summary);
       deliveredIndexes.push(index);
     } else omittedIndexes.push(index);
@@ -128,10 +127,7 @@ function buildBatchMessage(items: Array<{ message: string }>): {
       ...(omittedIndexes.length ? { omitted: omittedIndexes.length } : {}),
     });
   let message = encode();
-  while (
-    Buffer.byteLength(message) > MODEL_OUTPUT_MAX_BYTES &&
-    deliveredIndexes.length > 0
-  ) {
+  while (Buffer.byteLength(message) > maxBytes && deliveredIndexes.length > 0) {
     results.pop();
     const index = deliveredIndexes.pop();
     if (index !== undefined) omittedIndexes.push(index);
@@ -548,6 +544,9 @@ export class SubagentManager {
 
   private flushPendingCompletions(ctx: ExtensionContext) {
     this.currentCtx = ctx;
+    const batchBudget = getModelOutputBudget(
+      (ctx as unknown as { model?: { contextWindow?: number } })?.model,
+    );
     const ready: typeof this.pendingCompletions = [];
     for (const item of this.pendingCompletions.splice(0)) {
       if (this.shuttingDown || this.generation !== item.expectedGeneration) {
@@ -593,7 +592,7 @@ export class SubagentManager {
                 deliveredIndexes: [0],
                 omittedIndexes: [] as number[],
               }
-            : buildBatchMessage(group);
+            : buildBatchMessage(group, batchBudget);
         const deliveredItems = built.deliveredIndexes.map(
           (index) => group[index],
         );
@@ -607,7 +606,7 @@ export class SubagentManager {
             deliveredItems
               .map((item) => item?.displayMessage ?? item?.message ?? "")
               .join("\n\n"),
-            MODEL_OUTPUT_MAX_BYTES,
+            batchBudget,
           ),
           completionId: undefined,
           details: {

@@ -45,11 +45,10 @@ import {
   extractTextContent,
   getScopedModels,
   getSubagentModelCandidates,
+  getSubagentResultBudget,
   isPathInsideAny,
   isSubagentRecord,
-  MODEL_OUTPUT_MAX_BYTES,
   MODEL_OUTPUT_MAX_LINES,
-  SUBAGENT_RESULT_MAX_BYTES,
   readIndex,
   renderToolResult,
   resolveSubagentCwd,
@@ -255,14 +254,13 @@ export function registerSubagentModule(
     name: "subagent_models",
     label: "Subagent Models",
     description:
-      "List live Pi models available to subagents with reasoning, context, input, thinking, and cost-per-million-token metadata. Use this only when model choice matters.",
-    promptSnippet:
-      "List live models available to subagents for deliberate model selection.",
+      "List live models for subagent selection. Use only when model choice matters.",
+    promptSnippet: "List models for subagent selection.",
     parameters: Type.Object({
       offset: Type.Optional(
         Type.Integer({
           minimum: 0,
-          description: "Pagination offset from a previous nextOffset value",
+          description: "Offset from previous nextOffset",
         }),
       ),
     }),
@@ -340,17 +338,13 @@ export function registerSubagentModule(
     name: "subagent",
     label: "Subagent",
     description:
-      "Delegate self-contained work to a child Pi session. Omit model to inherit the current model; query subagent_models when task requirements make another live model a better fit.",
-    promptSnippet:
-      "Delegate self-contained work to a child session; inherit the current model unless a better live candidate is needed.",
+      "Delegate work to a child session. Omit model to inherit parent; call subagent_models only if model choice matters.",
+    promptSnippet: "Spawn child session for independent work.",
     promptGuidelines: [
-      "Keep simple work in the parent; use at most two active subagents for one task and only split independent work.",
-      "Use subagent for self-contained work and include the exact paths, constraints, and completion criteria the child needs.",
-      "Omit model for ordinary delegation so the child inherits the current parent model.",
-      "Call subagent_models only when reasoning quality, context size, cost, or input modality makes model choice material; then pass an exact returned model ID.",
-      "Prefer reasoning models for debugging, architecture, review, and planning; prefer lower-cost models for mechanical or easily parallelized tasks.",
-      "Use worktree: true for concurrent edits or any child mutation that must be isolated; omit it for read-only work.",
-      "Use background: true only when the current turn does not depend on the result.",
+      "Keep simple work in parent; batch independent work ≤2 subagents.",
+      "Include paths, constraints, done-criteria; omit model to inherit parent.",
+      "Use subagent_models only when reasoning/context/cost matters.",
+      "worktree:true for concurrent writes; background:true only if async needed.",
     ],
     prepareArguments(args: unknown) {
       // Legacy callers may still pass tool arrays; the public contract does
@@ -362,30 +356,31 @@ export function registerSubagentModule(
       }
       return args as any;
     },
-    parameters: Type.Object({
-      prompt: Type.String({
-        description:
-          "Self-contained task instructions with context, file paths, and completion criteria",
-      }),
-      model: Type.Optional(
-        Type.String({
+    parameters: Type.Object(
+      {
+        prompt: Type.String({
           description:
-            "Exact provider/model ID from subagent_models; omit to inherit the current parent model",
+            "Task instructions with context, file paths, and completion criteria",
         }),
-      ),
-      worktree: Type.Optional(
-        Type.Boolean({
-          description:
-            "Run in an isolated Git worktree; required for concurrent file writes",
-        }),
-      ),
-      background: Type.Optional(
-        Type.Boolean({
-          description:
-            "Run asynchronously in the background without blocking the current turn",
-        }),
-      ),
-    }),
+        model: Type.Optional(
+          Type.String({
+            description:
+              "Exact provider/model ID from subagent_models; omit to inherit parent",
+          }),
+        ),
+        worktree: Type.Optional(
+          Type.Boolean({
+            description: "Isolated Git worktree for concurrent writes",
+          }),
+        ),
+        background: Type.Optional(
+          Type.Boolean({
+            description: "Run async without blocking current turn",
+          }),
+        ),
+      },
+      { additionalProperties: true },
+    ),
     async execute(_id, args: SubagentToolArgs, signal, _up, ctx) {
       // Keep the old control payloads readable for durable sessions and direct
       // callers, while exposing only the small spawn contract above to the LLM.
@@ -1705,8 +1700,11 @@ export function registerSubagentModule(
                 : "finished";
           let reason = thrown ?? assistant?.errorMessage;
           const rawText = extractTextContent(assistant?.content).trim();
+          const resultBudget = getSubagentResultBudget(
+            session.model as { contextWindow?: number } | undefined,
+          );
           const truncated = truncateTail(rawText, {
-            maxBytes: SUBAGENT_RESULT_MAX_BYTES,
+            maxBytes: resultBudget,
             maxLines: MODEL_OUTPUT_MAX_LINES,
           });
           let truncationNote = "";
@@ -1798,7 +1796,7 @@ export function registerSubagentModule(
               ...(usage.cost ? { cost: usage.cost } : {}),
             },
             "output",
-            SUBAGENT_RESULT_MAX_BYTES,
+            resultBudget,
           );
           const display = `${header}${mainContent}${truncationNote}${reasonText}${recovery}${fallback}${badge}`;
           const completionDetails = {

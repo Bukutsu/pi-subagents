@@ -36,6 +36,20 @@ export const SUBAGENT_RESULT_MAX_BYTES = Math.floor(
 );
 export const MODEL_OUTPUT_MAX_LINES = 400;
 
+export function getModelOutputBudget(model?: {
+  contextWindow?: number;
+}): number {
+  if (!model?.contextWindow) return MODEL_OUTPUT_MAX_BYTES;
+  const derived = Math.floor(model.contextWindow / 8); // ~context/32 tokens in bytes (~4 bytes/token)
+  return Math.min(32 * 1024, Math.max(4 * 1024, derived));
+}
+
+export function getSubagentResultBudget(model?: {
+  contextWindow?: number;
+}): number {
+  return Math.floor(getModelOutputBudget(model) / MAX_ACTIVE_SUBAGENTS);
+}
+
 export function serializeModelJson(
   value: Record<string, unknown>,
   outputKey = "output",
@@ -253,7 +267,7 @@ export function saveRecord(record: SubagentRecord) {
     throw new Error(`Invalid subagent session ID: ${record.sessionId}`);
   ensurePrivateDir(SUBAGENT_INDEX);
   const target = join(SUBAGENT_INDEX, `${record.sessionId}.json`);
-  atomicWriteFileSync(target, `${JSON.stringify(record, null, 2)}\n`, 0o600);
+  atomicWriteFileSync(target, `${JSON.stringify(record)}\n`, 0o600);
 }
 
 export function usageSince(current: SessionStats, baseline: SessionStats) {
@@ -428,23 +442,15 @@ export function describeSubagentModel(
   current?: Model<any>,
 ) {
   const { model } = candidate;
-  const thinking = Object.entries(model.thinkingLevelMap ?? {})
-    .filter(([, value]) => value !== null)
-    .map(([level]) => level);
   return {
     model: modelKey(model),
-    ...(model.name ? { name: model.name } : {}),
     ...(current && modelKey(model) === modelKey(current)
       ? { current: true }
       : {}),
-    reasoning: model.reasoning,
-    contextWindow: model.contextWindow,
-    maxTokens: model.maxTokens,
-    input: model.input,
+    ...(model.reasoning ? { reasoning: true } : {}),
     ...(candidate.thinkingLevel
       ? { configuredThinking: candidate.thinkingLevel }
       : {}),
-    ...(thinking.length ? { thinking } : {}),
     ...(model.cost
       ? {
           costPerMillionTokens: {
