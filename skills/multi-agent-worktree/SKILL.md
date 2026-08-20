@@ -1,11 +1,11 @@
 ---
 name: multi-agent-worktree
-description: Git worktrees for concurrent subagents. Use for parallel edits, competing implementations, or isolated refactors.
+description: worktree — isolated Git worktrees for concurrent subagents. Reach for parallel edits, competing implementations, or isolated refactors.
 ---
 
 # Multi-Agent Worktree Coordination
 
-Reference and workflows for parallel coding, speculative exploration, and isolated refactors using `pi-subagents` and Git worktrees.
+Reference and workflows for `pi-subagents` worktrees.
 
 ## Rules
 
