@@ -48,6 +48,13 @@ import {
 const BRAILLE = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 const WIDGET_REFRESH_MS = 200;
 
+/** Shrink an oversized result to the budget via the batch summarizer. */
+export function shrinkToBudget(message: string, maxBytes: number): string {
+  return Buffer.byteLength(message) <= maxBytes
+    ? message
+    : buildBatchMessage([{ message }], maxBytes).message;
+}
+
 function parseCompletionMessage(message: string): unknown {
   try {
     return JSON.parse(message);
@@ -234,6 +241,7 @@ export class SubagentManager {
     };
     this.pi.on("session_before_switch", blockWhileActive("switch sessions"));
     this.pi.on("session_before_fork", blockWhileActive("fork session"));
+    this.pi.on("session_before_compact", blockWhileActive("compact session"));
     this.pi.on(
       "session_before_tree",
       blockWhileActive("navigate session tree"),
@@ -692,10 +700,7 @@ export class SubagentManager {
       // A child with a larger context window than the parent can produce a
       // result above the parent's delivery budget; shrink it through the
       // batch summarizer instead of sending an oversized payload.
-      const outgoing =
-        Buffer.byteLength(message) > this.outputBudget(active)
-          ? buildBatchMessage([{ message }], this.outputBudget(active)).message
-          : message;
+      const outgoing = shrinkToBudget(message, this.outputBudget(active));
       this.sendCompletionMessage(
         outgoing,
         completion,

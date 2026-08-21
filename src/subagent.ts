@@ -28,6 +28,7 @@ import {
 import { Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import type { SubagentManager } from "./manager.js";
+import { shrinkToBudget } from "./manager.js";
 import {
   SUBAGENT_INDEX,
   SUBAGENT_LOCKS,
@@ -264,6 +265,11 @@ export function registerSubagentModule(
       ),
     }),
     async execute(_id, args: { offset?: number }, _signal, _up, ctx) {
+      // Match the legacy action:"models" path so both entry points report
+      // the same live availability.
+      const parentRuntime = (ctx.modelRegistry as any)?.runtime as
+        ModelRuntime | undefined;
+      if (parentRuntime) await refreshRuntime(parentRuntime);
       return listSubagentModels(ctx, Math.max(0, args.offset ?? 0));
     },
     renderCall(_args, theme) {
@@ -1545,7 +1551,9 @@ export function registerSubagentModule(
         try {
           await disposeChild();
         } catch {}
-        manager.jobs.delete(pid);
+        // The jobs map is process-global and pids can be reused by a newer
+        // generation after a forced cleanup; only delete our own job.
+        if (manager.jobs.get(pid) === job) manager.jobs.delete(pid);
         removeFreshSessionFile();
         if (isNewWorktree) {
           await removeWorktree(pi, ctx.cwd, childCwd, branch);
@@ -1703,7 +1711,7 @@ export function registerSubagentModule(
           });
           let truncationNote = "";
           let retainedLogFile: string | undefined;
-          if (truncated.truncated) {
+          const retainFullOutput = () => {
             try {
               const bytes = Buffer.from(rawText);
               const retained = bytes.subarray(0, MAX_FULL_OUTPUT_BYTES);
@@ -1719,7 +1727,8 @@ export function registerSubagentModule(
               truncationNote =
                 "\n\nResult truncated; full output remains in the durable session file; a temporary log could not be retained.";
             }
-          }
+          };
+          if (truncated.truncated) retainFullOutput();
           const terminalFields = {
             state,
             durationSec: Math.round((Date.now() - job.startedAt) / 1000),
@@ -1772,26 +1781,34 @@ export function registerSubagentModule(
             usage: completedRecord.usage,
             logPath: retainedLogFile,
           });
-          const compact = serializeModelJson(
-            {
-              v: 1,
-              type: "subagent",
-              event: "complete",
-              sessionId: session.sessionId,
-              state,
-              ...(truncated.content ? { output: truncated.content } : {}),
-              ...(reason ? { reason: sanitizeTerminalOutput(reason) } : {}),
-              ...(truncated.truncated ? { outputTruncated: true } : {}),
-              ...(retainedLogFile ? { logPath: retainedLogFile } : {}),
-              durationSec: completedRecord.durationSec ?? 0,
-              turns: completedRecord.turns,
-              toolCount: completedRecord.toolCount,
-              toolFailures: completedRecord.toolFailures,
-              ...(usage.cost ? { cost: usage.cost } : {}),
-            },
-            "output",
-            resultBudget,
-          );
+          const payload: Record<string, unknown> = {
+            v: 1,
+            type: "subagent",
+            event: "complete",
+            sessionId: session.sessionId,
+            state,
+            ...(truncated.content ? { output: truncated.content } : {}),
+            ...(reason ? { reason: sanitizeTerminalOutput(reason) } : {}),
+            ...(truncated.truncated ? { outputTruncated: true } : {}),
+            ...(retainedLogFile ? { logPath: retainedLogFile } : {}),
+            durationSec: completedRecord.durationSec ?? 0,
+            turns: completedRecord.turns,
+            toolCount: completedRecord.toolCount,
+            toolFailures: completedRecord.toolFailures,
+            ...(usage.cost ? { cost: usage.cost } : {}),
+          };
+          if (
+            !truncated.truncated &&
+            truncated.content &&
+            Buffer.byteLength(JSON.stringify(payload)) > resultBudget
+          ) {
+            // JSON escaping inflated the serialized output past the budget;
+            // keep the raw text recoverable instead of silently dropping it.
+            retainFullOutput();
+            payload.outputTruncated = true;
+            if (retainedLogFile) payload.logPath = retainedLogFile;
+          }
+          const compact = serializeModelJson(payload, "output", resultBudget);
           const display = `${header}${mainContent}${truncationNote}${reasonText}${recovery}${fallback}${badge}`;
           const completionDetails = {
             sessionId: session.sessionId,
@@ -1830,7 +1847,7 @@ export function registerSubagentModule(
               error,
             );
           } finally {
-            manager.jobs.delete(pid);
+            if (manager.jobs.get(pid) === job) manager.jobs.delete(pid);
             manager.syncStatus();
           }
         }
@@ -1853,7 +1870,12 @@ export function registerSubagentModule(
           content: [
             {
               type: "text",
-              text: result.compact,
+              // A child with a larger context window than the parent can
+              // exceed the parent's delivery budget; shrink before returning.
+              text: shrinkToBudget(
+                result.compact,
+                getModelOutputBudget(ctx.model),
+              ),
             },
           ],
           details: {
