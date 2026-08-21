@@ -387,6 +387,36 @@ export function acquireSessionLock(
           );
         const stale = `${lock}.stale-${randomUUID()}`;
         renameSync(lock, stale);
+        // Re-validate: another process may have stolen the stale lock and
+        // re-acquired it between our owner read and this rename.
+        let stolen = NaN;
+        let stolenStart: string | undefined;
+        try {
+          const rawStale = readFileSync(join(stale, "owner"), "utf8");
+          try {
+            const parsedStale = JSON.parse(rawStale) as {
+              pid?: unknown;
+              start?: unknown;
+            };
+            stolen = Number(parsedStale.pid);
+            stolenStart =
+              typeof parsedStale.start === "string"
+                ? parsedStale.start
+                : undefined;
+          } catch {
+            stolen = Number(rawStale);
+          }
+        } catch {}
+        const stillOurs =
+          stolen === owner &&
+          (ownerStart === undefined ||
+            stolenStart === undefined ||
+            ownerStart === stolenStart);
+        if (!stillOurs) {
+          // A live owner took over; give the lock back and retry.
+          renameSync(stale, lock);
+          continue;
+        }
         rmSync(stale, { recursive: true, force: true });
       } catch (staleError: unknown) {
         const staleErr = staleError as NodeJS.ErrnoException;

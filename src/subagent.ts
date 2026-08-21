@@ -834,6 +834,12 @@ export function registerSubagentModule(
         checkSetup?.();
         const setupController = new AbortController();
         let created: Awaited<ReturnType<typeof createAgentSession>> | undefined;
+        if (scopeRestricted && scopedModels.length === 0)
+          // Fresh spawn without an explicit model must not silently widen an
+          // empty live scope to unrestricted; match the explicit/resume paths.
+          throw new Error(
+            "No models in the live session scope are currently available; adjust /scoped-models or provider authentication",
+          );
         try {
           created = await createAgentSession({
             cwd: opts.cwd,
@@ -1299,6 +1305,10 @@ export function registerSubagentModule(
         if (existing) {
           childCwd = validatedCwd ?? existing.cwd;
           if (cwd) {
+            if (existing.branch)
+              throw new Error(
+                `cwd cannot be combined with a worktree subagent resume (saved cwd: ${existing.cwd})`,
+              );
             const resolvedCwd = resolveSubagentCwd(ctx.cwd, cwd);
             if (resolvedCwd !== childCwd) {
               throw new Error(
