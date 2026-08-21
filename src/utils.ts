@@ -40,12 +40,6 @@ export function getModelOutputBudget(model?: {
   return Math.min(32 * 1024, Math.max(4 * 1024, derived));
 }
 
-export function getSubagentResultBudget(model?: {
-  contextWindow?: number;
-}): number {
-  return Math.floor(getModelOutputBudget(model) / 2);
-}
-
 export function serializeModelJson(
   value: Record<string, unknown>,
   outputKey = "output",

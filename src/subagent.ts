@@ -45,7 +45,7 @@ import {
   extractTextContent,
   getScopedModels,
   getSubagentModelCandidates,
-  getSubagentResultBudget,
+  getModelOutputBudget,
   isPathInsideAny,
   isSubagentRecord,
   MODEL_OUTPUT_MAX_LINES,
@@ -1528,7 +1528,6 @@ export function registerSubagentModule(
           originLeafId,
           expectedGeneration,
           originSessionFile: ctx.sessionManager.getSessionFile() ?? "",
-          originSessionId: ctx.sessionManager.getSessionId(),
         };
         manager.jobs.set(pid, job);
         saveRecord(record);
@@ -1693,8 +1692,10 @@ export function registerSubagentModule(
                 : "finished";
           let reason = thrown ?? assistant?.errorMessage;
           const rawText = extractTextContent(assistant?.content).trim();
-          const resultBudget = getSubagentResultBudget(
-            session.model as { contextWindow?: number } | undefined,
+          const resultBudget = Math.floor(
+            getModelOutputBudget(
+              session.model as { contextWindow?: number } | undefined,
+            ) / 2,
           );
           const truncated = truncateTail(rawText, {
             maxBytes: resultBudget,

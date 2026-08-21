@@ -83,7 +83,6 @@ export interface SubagentJob {
   originLeafId: string | null;
   expectedGeneration: number;
   originSessionFile: string;
-  originSessionId: string;
   session: SubagentJobSession;
   activity?: string;
   baseline: SessionStats;
@@ -126,7 +125,7 @@ export function retainLog(content: string | Uint8Array, dir = LOG_DIR) {
       retainedCount++;
       retainedBytes += size;
     }
-    for (const name of remove) rmSync(join(LOG_DIR, name), { force: true });
+    for (const name of remove) rmSync(join(dir, name), { force: true });
     return path;
   } catch (error) {
     console.warn("Could not retain subagent output log:", error);

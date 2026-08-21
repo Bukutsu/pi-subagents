@@ -221,35 +221,23 @@ export class SubagentManager {
 
   private registerLifecycleEvents() {
     // Block session replacement when subagents are running.
-    this.pi.on("session_before_switch", (_event, ctx) => {
-      if (this.activeCount() > 0) {
-        ctx.ui.notify(
-          `Cannot switch sessions while ${this.activeCount()} subagent${this.activeCount() === 1 ? "" : "s"} running. Stop them with /subagent first.`,
-          "error",
-        );
-        return { cancel: true };
-      }
-    });
-
-    this.pi.on("session_before_fork", (_event, ctx) => {
-      if (this.activeCount() > 0) {
-        ctx.ui.notify(
-          `Cannot fork session while ${this.activeCount()} subagent${this.activeCount() === 1 ? "" : "s"} running. Stop them with /subagent first.`,
-          "error",
-        );
-        return { cancel: true };
-      }
-    });
-
-    this.pi.on("session_before_tree", (_event, ctx) => {
-      if (this.activeCount() > 0) {
-        ctx.ui.notify(
-          `Cannot navigate session tree while ${this.activeCount()} subagent${this.activeCount() === 1 ? "" : "s"} running. Stop them with /subagent first.`,
-          "error",
-        );
-        return { cancel: true };
-      }
-    });
+    const blockWhileActive = (action: string) => {
+      return (_event: unknown, ctx: ExtensionContext) => {
+        if (this.activeCount() > 0) {
+          ctx.ui.notify(
+            `Cannot ${action} while ${this.activeCount()} subagent${this.activeCount() === 1 ? "" : "s"} running. Stop them with /subagent first.`,
+            "error",
+          );
+          return { cancel: true };
+        }
+      };
+    };
+    this.pi.on("session_before_switch", blockWhileActive("switch sessions"));
+    this.pi.on("session_before_fork", blockWhileActive("fork session"));
+    this.pi.on(
+      "session_before_tree",
+      blockWhileActive("navigate session tree"),
+    );
 
     this.pi.on("session_start", (_e, ctx) => {
       this.generation++;

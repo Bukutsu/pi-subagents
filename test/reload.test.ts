@@ -306,7 +306,6 @@ test("session switch does not clobber other session jobs", async () => {
     originLeafId: "leaf-A",
     expectedGeneration: oldManager.generation,
     originSessionFile: "session-A.jsonl",
-    originSessionId: "session-A-id",
   } as any;
   oldManager.jobs.set(400, jobA);
 
@@ -316,11 +315,6 @@ test("session switch does not clobber other session jobs", async () => {
     ctxSessionA,
   );
   assert.deepEqual(blockResult, { cancel: true });
-  assert.equal(
-    jobA.originSessionId,
-    "session-A-id",
-    "origin preserved after blocked switch",
-  );
 
   oldManager.jobs.delete(400);
 });
