@@ -413,8 +413,12 @@ export function acquireSessionLock(
             stolenStart === undefined ||
             ownerStart === stolenStart);
         if (!stillOurs) {
-          // A live owner took over; give the lock back and retry.
-          renameSync(stale, lock);
+          // A newer owner may have taken the lock path while we held the
+          // displaced copy; give it back unless the target is occupied
+          // again, in which case leave it for residue sweeping.
+          try {
+            renameSync(stale, lock);
+          } catch {}
           continue;
         }
         rmSync(stale, { recursive: true, force: true });
