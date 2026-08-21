@@ -2,7 +2,8 @@
 
 ## Unreleased
 
-- Cap active subagents at two, bound child/batched result output, flush queued completions when the parent settles, and coalesce model-runtime refreshes.
+- Remove the active-subagent cap; any number of children may run concurrently, with per-child and batched result byte caps keeping context growth bounded.
+- Flush queued completions when the parent settles and coalesce model-runtime refreshes.
 - Remove the unbounded legacy `context:fork` spawn path; use the default project context instead.
 - Add a 100 MB aggregate cap to retained output logs.
 - Add live `subagent_models` discovery and optional exact model selection; children inherit the parent’s current model by default.

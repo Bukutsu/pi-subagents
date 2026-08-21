@@ -10,7 +10,6 @@ import {
 } from "@earendil-works/pi-tui";
 
 import {
-  MAX_ACTIVE_SUBAGENTS,
   SUBAGENT_DIR,
   SUBAGENT_SESSION_DIR,
   type SubagentJob,
@@ -141,10 +140,6 @@ export class SubagentManager {
 
   public activeCount(): number {
     return this.jobs.size + this.pendingSetups.size;
-  }
-
-  public canStart(): boolean {
-    return this.activeCount() < MAX_ACTIVE_SUBAGENTS;
   }
 
   public getNextPid(): number {
@@ -749,10 +744,6 @@ export class SubagentManager {
   }
 
   public trackSetup(controller: AbortController) {
-    if (!this.canStart())
-      throw new Error(
-        `Subagent limit reached: at most ${MAX_ACTIVE_SUBAGENTS} active subagents`,
-      );
     this.pendingSetups.add(controller);
     return () => this.pendingSetups.delete(controller);
   }

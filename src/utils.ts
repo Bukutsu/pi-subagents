@@ -22,7 +22,6 @@ import type {
 import { Markdown, Text } from "@earendil-works/pi-tui";
 import type { Model } from "@earendil-works/pi-ai";
 import {
-  MAX_ACTIVE_SUBAGENTS,
   SUBAGENT_INDEX,
   SUBAGENT_LOCKS,
   SUBAGENT_SESSION_DIR,
@@ -31,9 +30,7 @@ import {
 } from "./types.js";
 
 export const MODEL_OUTPUT_MAX_BYTES = 16 * 1024;
-export const SUBAGENT_RESULT_MAX_BYTES = Math.floor(
-  MODEL_OUTPUT_MAX_BYTES / MAX_ACTIVE_SUBAGENTS,
-);
+export const SUBAGENT_RESULT_MAX_BYTES = Math.floor(MODEL_OUTPUT_MAX_BYTES / 2);
 export const MODEL_OUTPUT_MAX_LINES = 400;
 
 export function getModelOutputBudget(model?: {
@@ -47,7 +44,7 @@ export function getModelOutputBudget(model?: {
 export function getSubagentResultBudget(model?: {
   contextWindow?: number;
 }): number {
-  return Math.floor(getModelOutputBudget(model) / MAX_ACTIVE_SUBAGENTS);
+  return Math.floor(getModelOutputBudget(model) / 2);
 }
 
 export function serializeModelJson(

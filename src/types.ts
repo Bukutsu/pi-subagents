@@ -13,7 +13,6 @@ import {
 } from "node:fs";
 import { join } from "node:path";
 
-export const MAX_ACTIVE_SUBAGENTS = 2;
 export const SUBAGENT_DIR = join(getAgentDir(), "pi-subagents");
 export const LOG_DIR = join(SUBAGENT_DIR, "logs");
 const MAX_RETAINED_LOGS = 50;

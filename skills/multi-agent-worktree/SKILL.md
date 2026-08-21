@@ -37,7 +37,7 @@ Use when splitting work across distinct files or subsystems that do not conflict
 
 Use when testing multiple distinct approaches to a complex problem or bug.
 
-1. **Dispatch at most two competing candidates**: Call multiple `subagent` tasks in parallel with `worktree: true`, each specifying a different implementation approach:
+1. **Dispatch competing candidates**: Call multiple `subagent` tasks in parallel with `worktree: true`, each specifying a different implementation approach:
    - Candidate A: `subagent({ prompt: "Approach A: Refactor parser using AST visitor...", worktree: true })`
    - Candidate B: `subagent({ prompt: "Approach B: Refactor parser using regex state machine...", worktree: true })`
 2. **Evaluate solutions**: Compare candidate branches using `git diff HEAD..<branch-A>` and `git diff HEAD..<branch-B>`, checking test pass rates and implementation simplicity.

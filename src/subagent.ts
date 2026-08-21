@@ -340,11 +340,12 @@ export function registerSubagentModule(
       "delegate — child session for independent work. Inherits parent model/tools/cwd.",
     promptSnippet: "delegate to child session.",
     promptGuidelines: [
-      "delegate: keep simple work in parent; batch independent work ≤2 subagents.",
+      "delegate: keep simple work in parent; batch independent work in parallel in one turn.",
       "isolate: include paths, constraints, and done-criteria; omit model to inherit parent.",
       "select: reach subagent_models only when reasoning/context/cost matters.",
       "dispatch: worktree:true for concurrent writes; background:true to return immediately.",
     ],
+    executionMode: "parallel" as const,
     prepareArguments(args: unknown) {
       // Legacy callers may still pass tool arrays; the public contract does
       // not expose tool selection, but accepting the old shape is harmless.

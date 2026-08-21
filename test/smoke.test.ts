@@ -25,7 +25,6 @@ function setup() {
     currentCtx: undefined,
     shuttingDown: false,
     guard() {},
-    canStart: () => true,
     syncStatus() {},
     track: (promise: Promise<void>) => promise,
     trackSetup: () => () => {},

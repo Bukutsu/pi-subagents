@@ -2,34 +2,29 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { SubagentManager } from "../src/manager.js";
 
-test("limits active jobs and setup to two subagents", () => {
+test("tracks active jobs and setup reservations", () => {
   const manager = new SubagentManager({} as any);
   assert.equal(manager.activeCount(), 0);
-  assert.equal(manager.canStart(), true);
 
   const releaseSetup = manager.trackSetup(new AbortController());
   assert.equal(manager.activeCount(), 1);
   manager.jobs.set(1, {} as any);
   assert.equal(manager.activeCount(), 2);
-  assert.equal(manager.canStart(), false);
 
   releaseSetup();
   manager.jobs.delete(1);
-  assert.equal(manager.canStart(), true);
+  assert.equal(manager.activeCount(), 0);
 });
 
-test("shares setup reservations across manager instances", () => {
+test("allows unbounded concurrent setup reservations across manager instances", () => {
   const first = new SubagentManager({} as any);
   const second = new SubagentManager({} as any);
   const releaseFirst = first.trackSetup(new AbortController());
   const releaseSecond = second.trackSetup(new AbortController());
 
+  // Setup reservations are process-global, so each instance sees both.
   assert.equal(first.activeCount(), 2);
-  assert.equal(second.canStart(), false);
-  assert.throws(
-    () => second.trackSetup(new AbortController()),
-    /at most 2 active subagents/,
-  );
+  assert.equal(second.activeCount(), 2);
 
   releaseFirst();
   releaseSecond();
