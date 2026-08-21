@@ -371,15 +371,9 @@ export function acquireSessionLock(
       if (err?.code !== "EEXIST" && err?.code !== "ENOTEMPTY") throw error;
       try {
         const ownerFile = join(lock, "owner");
-        let owner = NaN;
-        let ownerStart: string | undefined;
-        try {
-          if (existsSync(ownerFile)) {
-            const parsedOwner = parseOwnerFile(ownerFile);
-            owner = parsedOwner.pid;
-            ownerStart = parsedOwner.start;
-          }
-        } catch {}
+        const parsedOwner = parseOwnerFile(ownerFile);
+        let owner = parsedOwner.pid;
+        const ownerStart = parsedOwner.start;
         const ownerAlive = !Number.isNaN(owner) && processIsAlive(owner);
         const currentStart = ownerAlive
           ? processStartIdentity(owner)
