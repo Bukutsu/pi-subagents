@@ -559,6 +559,10 @@ export class SubagentManager {
         !this.canDeliverToOrigin(item.originLeafId, ctx) ||
         (!ctx.isIdle() && (item.completion === "queue" || !item.triggerTurn))
       ) {
+        // Requeueing busy items here is deliberate: pi's deliverAs:"followUp"
+        // only parks when triggerTurn !== false, and queue completions send
+        // triggerTurn:false to stay silent. Delegating the wait to pi would
+        // append them mid-turn as an implicit steer instead.
         this.pendingCompletions.push(item);
         continue;
       }
