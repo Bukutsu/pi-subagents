@@ -20,7 +20,7 @@ When working on complex projects, you often need to run independent tasks in par
 1. **Zero configuration**: The child session automatically inherits your active model, thinking budget, active tools, and working directory.
 2. **In-process & fast**: No Docker containers or background daemons. Children run as lightweight Pi agent sessions inside the same process.
 3. **Synchronous by default**: Subagents block and return their full output directly in the tool response. Dispatch as many children in parallel as you need; per-child and batched result caps keep parent context growth predictable.
-4. **Bounded results**: Child results are capped at 8 KB each, and batched completions are capped at 16 KB to keep parent context growth predictable.
+4. **Bounded results**: Output budgets scale with the model's context window (up to 16 KB per child and 32 KB per batched delivery) to keep parent context growth predictable.
 5. **Session replacement is coordinated**: `/reload`, `/new`, `/resume`, and tree navigation wait while subagents are running. Stop them with `/subagent kill all` when replacement must happen immediately.
 
 ## Install
@@ -127,10 +127,12 @@ All subagent state is kept in private directories outside your project tree:
 | Item                        | Path                                  |
 | :-------------------------- | :------------------------------------ |
 | **Session records & index** | `~/.pi/agent/pi-subagents/index/`     |
+| **Durable transcripts**     | `~/.pi/agent/pi-subagents/sessions/`  |
+| **Session locks**           | `~/.pi/agent/pi-subagents/locks/`     |
 | **Active worktrees**        | `~/.pi/agent/pi-subagents/worktrees/` |
 | **Retained logs**           | `~/.pi/agent/pi-subagents/logs/`      |
 
-- **Output safety**: Parent-visible child output is capped at 16 KB / 400 lines to prevent token blowups. Full logs remain saved on disk if truncated.
+- **Output safety**: Parent-visible child output is capped at 400 lines with a byte budget that scales with the model's context window (max 16 KB per child). Full logs remain saved on disk if truncated.
 - **Recursive prevention**: Child sessions load all your standard tools, but the `subagent` tool itself is excluded inside children to prevent infinite recursion.
 
 ---

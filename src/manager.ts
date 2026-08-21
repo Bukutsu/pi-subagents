@@ -580,7 +580,7 @@ export class SubagentManager {
         const first = group[0];
         if (!first) continue;
         const built =
-          group.length === 1
+          group.length === 1 && Buffer.byteLength(first.message) <= batchBudget
             ? {
                 message: first.message,
                 deliveredIndexes: [0],
