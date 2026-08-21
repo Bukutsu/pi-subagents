@@ -206,6 +206,13 @@ export function registerSubagentModule(
     return cards.join("\n\n");
   }
 
+  async function listLiveSubagentModels(ctx: ExtensionContext, offset = 0) {
+    const parentRuntime = (ctx.modelRegistry as any)?.runtime as
+      ModelRuntime | undefined;
+    if (parentRuntime) await refreshRuntime(parentRuntime);
+    return listSubagentModels(ctx, offset);
+  }
+
   function listSubagentModels(ctx: ExtensionContext, offset = 0) {
     const candidates = getSubagentModelCandidates(ctx);
     const page = candidates.slice(offset, offset + MAX_LIST_ITEMS);
@@ -267,10 +274,7 @@ export function registerSubagentModule(
     async execute(_id, args: { offset?: number }, _signal, _up, ctx) {
       // Match the legacy action:"models" path so both entry points report
       // the same live availability.
-      const parentRuntime = (ctx.modelRegistry as any)?.runtime as
-        ModelRuntime | undefined;
-      if (parentRuntime) await refreshRuntime(parentRuntime);
-      return listSubagentModels(ctx, Math.max(0, args.offset ?? 0));
+      return listLiveSubagentModels(ctx, Math.max(0, args.offset ?? 0));
     },
     renderCall(_args, theme) {
       return new Text(
@@ -1046,10 +1050,7 @@ export function registerSubagentModule(
       };
 
       if (action === "models") {
-        const parentRuntime = (ctx.modelRegistry as any)?.runtime as
-          ModelRuntime | undefined;
-        if (parentRuntime) await refreshRuntime(parentRuntime);
-        return listSubagentModels(ctx, Math.max(0, modelOffset));
+        return listLiveSubagentModels(ctx, Math.max(0, modelOffset));
       }
       if (action === "status") {
         const active = new Map(

@@ -320,6 +320,22 @@ function sweepLockResidue(lockDir: string) {
   }
 }
 
+function parseOwnerFile(path: string): { pid: number; start?: string } {
+  let pid = NaN;
+  let start: string | undefined;
+  try {
+    const raw = readFileSync(path, "utf8");
+    try {
+      const parsed = JSON.parse(raw) as { pid?: unknown; start?: unknown };
+      pid = Number(parsed.pid);
+      start = typeof parsed.start === "string" ? parsed.start : undefined;
+    } catch {
+      pid = Number(raw);
+    }
+  } catch {}
+  return { pid, start };
+}
+
 export function acquireSessionLock(
   sessionId: string,
   lockDir: string = SUBAGENT_LOCKS,
@@ -359,18 +375,9 @@ export function acquireSessionLock(
         let ownerStart: string | undefined;
         try {
           if (existsSync(ownerFile)) {
-            const rawOwner = readFileSync(ownerFile, "utf8");
-            try {
-              const parsed = JSON.parse(rawOwner) as {
-                pid?: unknown;
-                start?: unknown;
-              };
-              owner = Number(parsed.pid);
-              ownerStart =
-                typeof parsed.start === "string" ? parsed.start : undefined;
-            } catch {
-              owner = Number(rawOwner);
-            }
+            const parsedOwner = parseOwnerFile(ownerFile);
+            owner = parsedOwner.pid;
+            ownerStart = parsedOwner.start;
           }
         } catch {}
         const ownerAlive = !Number.isNaN(owner) && processIsAlive(owner);
@@ -389,24 +396,9 @@ export function acquireSessionLock(
         renameSync(lock, stale);
         // Re-validate: another process may have stolen the stale lock and
         // re-acquired it between our owner read and this rename.
-        let stolen = NaN;
-        let stolenStart: string | undefined;
-        try {
-          const rawStale = readFileSync(join(stale, "owner"), "utf8");
-          try {
-            const parsedStale = JSON.parse(rawStale) as {
-              pid?: unknown;
-              start?: unknown;
-            };
-            stolen = Number(parsedStale.pid);
-            stolenStart =
-              typeof parsedStale.start === "string"
-                ? parsedStale.start
-                : undefined;
-          } catch {
-            stolen = Number(rawStale);
-          }
-        } catch {}
+        const parsedStale = parseOwnerFile(join(stale, "owner"));
+        const stolen = parsedStale.pid;
+        const stolenStart = parsedStale.start;
         const stillOurs =
           stolen === owner &&
           (ownerStart === undefined ||
