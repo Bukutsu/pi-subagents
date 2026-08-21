@@ -74,9 +74,21 @@ function summarizeCompletion(value: unknown): unknown {
     "state" in value && typeof value.state === "string"
       ? value.state
       : undefined;
+  // Keep the retained-log pointer and a capped reason so a summarized
+  // oversized result stays recoverable.
+  const logPath =
+    "logPath" in value && typeof value.logPath === "string"
+      ? value.logPath
+      : undefined;
+  const reason =
+    "reason" in value && typeof value.reason === "string"
+      ? value.reason.slice(0, 200)
+      : undefined;
   return {
     ...(sessionId ? { sessionId } : {}),
     ...(state ? { state } : {}),
+    ...(logPath ? { logPath } : {}),
+    ...(reason ? { reason } : {}),
     outputTruncated: true,
   };
 }

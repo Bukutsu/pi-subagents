@@ -589,9 +589,15 @@ export function registerSubagentModule(
               resolvedThinking = matched.thinkingLevel as
                 ThinkingLevel | undefined;
             } else {
-              const availableNames = selectionCandidates
-                .map((s) => `${s.model.provider}/${s.model.id}`)
-                .join(", ");
+              const allNames = selectionCandidates.map(
+                (s) => `${s.model.provider}/${s.model.id}`,
+              );
+              const listed = allNames.slice(0, 8);
+              const availableNames =
+                listed.join(", ") +
+                (allNames.length > listed.length
+                  ? `, +${allNames.length - listed.length} more`
+                  : "");
               throw new Error(
                 scopeRestricted
                   ? `Model '${modelSpec}' is outside the live session scope. Query subagent action:models and retry. Scope: ${availableNames}`

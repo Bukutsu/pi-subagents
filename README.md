@@ -132,7 +132,7 @@ All subagent state is kept in private directories outside your project tree:
 | **Active worktrees**        | `~/.pi/agent/pi-subagents/worktrees/` |
 | **Retained logs**           | `~/.pi/agent/pi-subagents/logs/`      |
 
-- **Output safety**: Parent-visible child output is capped at 400 lines with a byte budget that scales with the model's context window (max 16 KB per child). Truncated output up to 10 MB is retained on disk; anything larger keeps only its tail.
+- **Output safety**: Parent-visible child output is capped at 400 lines with a byte budget that scales with the model's context window (max 16 KB per child). Truncated output is retained on disk up to 10 MB (first 10 MB kept); the parent-visible result keeps the tail.
 - **Recursive prevention**: Child sessions load all your standard tools, but the `subagent` tool itself is excluded inside children to prevent infinite recursion.
 
 ---
