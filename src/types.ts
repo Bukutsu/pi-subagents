@@ -94,21 +94,21 @@ export interface SubagentJob {
   stopping?: boolean;
 }
 
-export function retainLog(content: string | Uint8Array) {
+export function retainLog(content: string | Uint8Array, dir = LOG_DIR) {
   // Retained output logs live outside the temporary capture dir so they
   // survive process exit and pi updates. Oldest logs are pruned.
   try {
-    mkdirSync(LOG_DIR, { recursive: true, mode: 0o700 });
-    const path = join(LOG_DIR, `${Date.now()}-${randomUUID()}.log`);
+    mkdirSync(dir, { recursive: true, mode: 0o700 });
+    const path = join(dir, `${Date.now()}-${randomUUID()}.log`);
     writeFileSync(path, content, { mode: 0o600 });
-    const logs = readdirSync(LOG_DIR)
+    const logs = readdirSync(dir)
       .filter((name) => name.endsWith(".log"))
       .sort();
     let retainedCount = 0;
     let retainedBytes = 0;
     const remove: string[] = [];
     for (const name of logs.reverse()) {
-      const path = join(LOG_DIR, name);
+      const path = join(dir, name);
       let size = 0;
       try {
         size = statSync(path).size;

@@ -9,7 +9,7 @@ Reference and workflows for `pi-subagents` worktrees.
 
 ## Rules
 
-- **Delegation budget**: Use no more than two active subagents for one task. Use fewer when the work is simple or the slices overlap.
+- **Delegation budget**: Dispatch as many subagents as the task needs; per-child and batched result byte caps keep parent context growth bounded. Use fewer when the work is simple or the slices overlap.
 - **Worktree gating**: Use `worktree: true` when subagents write code concurrently or need mutation isolation. Omit `worktree` (default `false`) for read-only tasks (audits, research, reviews) and sequential in-place work.
 - **Harness isolation**: Dispatch via `subagent({ prompt, worktree: true })`. Pi manages worktree creation and lifecycle outside the working tree.
 - **Clean working tree**: `createWorktree` checks `git status --porcelain` before creation. Commit or stash parent changes first when the check fails.

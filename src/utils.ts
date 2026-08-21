@@ -30,7 +30,6 @@ import {
 } from "./types.js";
 
 export const MODEL_OUTPUT_MAX_BYTES = 16 * 1024;
-export const SUBAGENT_RESULT_MAX_BYTES = Math.floor(MODEL_OUTPUT_MAX_BYTES / 2);
 export const MODEL_OUTPUT_MAX_LINES = 400;
 
 export function getModelOutputBudget(model?: {
@@ -82,7 +81,11 @@ export function serializeModelJson(
     type: value.type,
     event: value.event,
     action: value.action,
-    truncated: true,
+    ...(typeof value.sessionId === "string"
+      ? { sessionId: value.sessionId }
+      : {}),
+    ...(typeof value.state === "string" ? { state: value.state } : {}),
+    outputTruncated: true,
   });
 }
 
@@ -304,6 +307,25 @@ function processStartIdentity(pid: number) {
   }
 }
 
+// A crash between mkdir and rename (or rename and rm) can leave orphaned
+// .tmp-*/.stale-* entries; sweep ones old enough that no live attempt owns them.
+function sweepLockResidue(lockDir: string) {
+  let entries: string[];
+  try {
+    entries = readdirSync(lockDir);
+  } catch {
+    return;
+  }
+  const cutoff = Date.now() - 60 * 60 * 1000;
+  for (const name of entries) {
+    if (!name.includes(".tmp-") && !name.includes(".stale-")) continue;
+    try {
+      if (statSync(join(lockDir, name)).mtimeMs < cutoff)
+        rmSync(join(lockDir, name), { recursive: true, force: true });
+    } catch {}
+  }
+}
+
 export function acquireSessionLock(
   sessionId: string,
   lockDir: string = SUBAGENT_LOCKS,
@@ -311,6 +333,7 @@ export function acquireSessionLock(
   if (!/^[a-zA-Z0-9-]+$/.test(sessionId))
     throw new Error(`Invalid subagent session ID: ${sessionId}`);
   ensurePrivateDir(lockDir);
+  sweepLockResidue(lockDir);
   const lock = join(lockDir, sessionId);
   for (let attempt = 0; attempt < 3; attempt++) {
     try {

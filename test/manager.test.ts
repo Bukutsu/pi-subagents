@@ -290,3 +290,46 @@ test("passes triggerTurn: false when delivering follow-up queue completions duri
     triggerTurn: false,
   });
 });
+
+test("killJob is idempotent for a known pid that is already stopping", () => {
+  const manager = new SubagentManager({} as any);
+  const controller = new AbortController();
+  controller.abort();
+  manager.jobs.set(1, { controller } as any);
+
+  assert.equal(manager.killJob(1), true);
+  assert.equal(manager.killJob(1), true);
+});
+
+test("oversized completions are shrunk to the parent delivery budget", () => {
+  const messages: unknown[] = [];
+  const manager = new SubagentManager({
+    sendMessage: (message: unknown) => messages.push(message),
+  } as any);
+  manager.shuttingDown = false;
+  manager.generation = 1;
+  const ctx: any = {
+    isIdle: () => true,
+    model: { contextWindow: 32768 },
+    sessionManager: {
+      getLeafId: () => "leaf-1",
+      getBranch: () => [{ id: "leaf-1" }],
+    },
+  };
+  manager.currentCtx = ctx;
+
+  const oversized = JSON.stringify({
+    type: "subagent",
+    output: '"\\'.repeat(4096),
+  });
+  manager.deliverCompletion(oversized, "continue", 1, "leaf-1");
+  assert.equal(messages.length, 1);
+  const content = (messages[0] as any).content as string;
+  assert.ok(
+    Buffer.byteLength(content) <= 4096,
+    "delivered message must fit the parent budget",
+  );
+  const parsed = JSON.parse(content);
+  assert.equal(parsed.event, "batch");
+  assert.equal(parsed.results[0].outputTruncated, true);
+});

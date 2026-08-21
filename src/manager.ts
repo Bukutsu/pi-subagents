@@ -2,6 +2,7 @@ import type {
   ExtensionAPI,
   ExtensionContext,
 } from "@earendil-works/pi-coding-agent";
+import { truncateTail } from "@earendil-works/pi-coding-agent";
 import {
   Box,
   Text,
@@ -46,14 +47,6 @@ import {
 
 const BRAILLE = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 const WIDGET_REFRESH_MS = 200;
-
-function truncateText(value: string, maxBytes: number): string {
-  const bytes = Buffer.from(value);
-  if (bytes.byteLength <= maxBytes) return value;
-  const suffix = "\n\n… truncated";
-  const room = Math.max(0, maxBytes - Buffer.byteLength(suffix));
-  return `${bytes.subarray(bytes.byteLength - room).toString("utf8")}${suffix}`;
-}
 
 function parseCompletionMessage(message: string): unknown {
   try {
@@ -141,14 +134,6 @@ export class SubagentManager {
   public activeCount(): number {
     return this.jobs.size + this.pendingSetups.size;
   }
-
-  public getNextPid(): number {
-    let max = 0;
-    for (const pid of this.jobs.keys()) {
-      if (pid > max) max = pid;
-    }
-    return Math.max(this.nextVirtualPid, max + 1);
-  }
   public currentCtx: ExtensionContext | undefined;
   public generation = 0;
   public shuttingDown = true;
@@ -163,6 +148,7 @@ export class SubagentManager {
     completion: "queue" | "continue";
     expectedGeneration: number;
     originLeafId: string | null;
+    originSessionFile?: string;
     triggerTurn: boolean;
     completionId?: string;
     displayMessage?: string;
@@ -271,6 +257,11 @@ export class SubagentManager {
       this.lifecycle = new AbortController();
       this.deliveredCompletionIds.clear();
       this.inFlightCompletionIds.clear();
+      const sessionFile = this.sessionFile(ctx);
+      this.pendingCompletions = this.pendingCompletions.filter(
+        (item) =>
+          !item.originSessionFile || item.originSessionFile === sessionFile,
+      );
       for (const item of this.pendingCompletions) {
         item.expectedGeneration = this.generation;
       }
@@ -304,11 +295,19 @@ export class SubagentManager {
             `${action} is waiting for ${this.activeCount()} running subagent${this.activeCount() === 1 ? "" : "s"}. Stop them with /subagent or wait for them to finish.`,
             "info",
           );
-          while (this.activeCount() > 0) {
+          // Setups have no run-phase deadline; cancel them so a hung setup
+          // cannot stall the wait indefinitely.
+          for (const controller of this.pendingSetups) controller.abort();
+          const deadline = Date.now() + 10000;
+          while (this.activeCount() > 0 && Date.now() < deadline) {
             await new Promise((resolve) => setTimeout(resolve, 100));
           }
+          if (this.activeCount() === 0) return;
+          ctx.ui.notify(
+            `${action} timed out waiting for subagents; stopping them.`,
+            "warning",
+          );
         }
-        return;
       }
       this.shuttingDown = true;
       this.lifecycle.abort();
@@ -538,9 +537,7 @@ export class SubagentManager {
 
   private flushPendingCompletions(ctx: ExtensionContext) {
     this.currentCtx = ctx;
-    const batchBudget = getModelOutputBudget(
-      (ctx as unknown as { model?: { contextWindow?: number } })?.model,
-    );
+    const batchBudget = this.outputBudget(ctx);
     const ready: typeof this.pendingCompletions = [];
     for (const item of this.pendingCompletions.splice(0)) {
       if (this.shuttingDown || this.generation !== item.expectedGeneration) {
@@ -596,12 +593,12 @@ export class SubagentManager {
           ...first,
           completion: completionMode,
           message: built.message,
-          displayMessage: truncateText(
+          displayMessage: truncateTail(
             deliveredItems
               .map((item) => item?.displayMessage ?? item?.message ?? "")
               .join("\n\n"),
-            batchBudget,
-          ),
+            { maxBytes: batchBudget },
+          ).content,
           completionId: undefined,
           details: {
             count: deliveredItems.length,
@@ -690,7 +687,7 @@ export class SubagentManager {
       (!active.isIdle() && (completion === "queue" || !triggerTurn)) ||
       !this.canDeliverToOrigin(originLeafId, active)
     ) {
-      this.pendingCompletions.push({
+      this.queueCompletion(
         message,
         completion,
         expectedGeneration,
@@ -699,13 +696,20 @@ export class SubagentManager {
         completionId,
         displayMessage,
         details,
-      });
+      );
       return;
     }
     try {
       if (completionId) this.inFlightCompletionIds.add(completionId);
+      // A child with a larger context window than the parent can produce a
+      // result above the parent's delivery budget; shrink it through the
+      // batch summarizer instead of sending an oversized payload.
+      const outgoing =
+        Buffer.byteLength(message) > this.outputBudget(active)
+          ? buildBatchMessage([{ message }], this.outputBudget(active)).message
+          : message;
       this.sendCompletionMessage(
-        message,
+        outgoing,
         completion,
         originLeafId,
         triggerTurn,
@@ -716,7 +720,7 @@ export class SubagentManager {
       );
     } catch (error) {
       if (completionId) this.inFlightCompletionIds.delete(completionId);
-      this.pendingCompletions.push({
+      this.queueCompletion(
         message,
         completion,
         expectedGeneration,
@@ -725,21 +729,62 @@ export class SubagentManager {
         completionId,
         displayMessage,
         details,
-      });
+      );
       console.warn("Could not deliver subagent result:", error);
     }
   }
 
+  private queueCompletion(
+    message: string,
+    completion: "queue" | "continue",
+    expectedGeneration: number,
+    originLeafId: string | null,
+    triggerTurn: boolean,
+    completionId?: string,
+    displayMessage?: string,
+    details?: unknown,
+  ) {
+    this.pendingCompletions.push({
+      message,
+      completion,
+      expectedGeneration,
+      originLeafId,
+      originSessionFile: this.currentCtx
+        ? this.sessionFile(this.currentCtx)
+        : undefined,
+      triggerTurn,
+      completionId,
+      displayMessage,
+      details,
+    });
+  }
+
+  private sessionFile(ctx: ExtensionContext): string | undefined {
+    return (
+      ctx as unknown as {
+        sessionManager?: { getSessionFile?: () => string };
+      }
+    )?.sessionManager?.getSessionFile?.();
+  }
+
+  private outputBudget(ctx: ExtensionContext): number {
+    return getModelOutputBudget(
+      (ctx as unknown as { model?: { contextWindow?: number } })?.model,
+    );
+  }
+
   public killJob(pid: number): boolean {
     const job = this.jobs.get(pid);
-    if (!job || job.controller.signal.aborted) return false;
-    job.stoppedManually = true;
-    job.stopping = true;
-    job.controller.abort();
-    this.pi.events?.emit("subagent:stop", {
-      pid,
-      sessionId: job.sessionId,
-    });
+    if (!job) return false;
+    if (!job.controller.signal.aborted) {
+      job.stoppedManually = true;
+      job.stopping = true;
+      job.controller.abort();
+      this.pi.events?.emit("subagent:stop", {
+        pid,
+        sessionId: job.sessionId,
+      });
+    }
     return true;
   }
 
@@ -750,8 +795,8 @@ export class SubagentManager {
 
   public killAllJobs(): number {
     let stopped = 0;
-    for (const pid of this.jobs.keys()) {
-      if (this.killJob(pid)) stopped++;
+    for (const [pid, job] of this.jobs) {
+      if (!job.controller.signal.aborted && this.killJob(pid)) stopped++;
     }
     for (const controller of this.pendingSetups) {
       if (!controller.signal.aborted) {

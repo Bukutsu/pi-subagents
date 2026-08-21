@@ -542,16 +542,14 @@ export function registerSubagentModule(
         let resolvedModel: Model<any> | undefined;
         let resolvedThinking: ThinkingLevel | undefined;
         let modelRequestWarning: string | undefined;
-        const scopedList = scopedModels;
-        const modelCandidates = selectionCandidates;
         if (modelSpec) {
-          if (scopeRestricted && modelCandidates.length === 0)
+          if (scopeRestricted && selectionCandidates.length === 0)
             throw new Error(
               "No models in the live session scope are currently available; adjust /scoped-models or provider authentication",
             );
-          if (modelCandidates.length > 0) {
+          if (selectionCandidates.length > 0) {
             const lowerSpec = modelSpec.toLowerCase();
-            const exactMatches = modelCandidates.filter(
+            const exactMatches = selectionCandidates.filter(
               (s) =>
                 `${s.model.provider}/${s.model.id}`.toLowerCase() ===
                   lowerSpec ||
@@ -563,7 +561,7 @@ export function registerSubagentModule(
                 `Ambiguous model '${modelSpec}'. Matches: ${exactMatches.map((s) => `${s.model.provider}/${s.model.id}`).join(", ")}`,
               );
             }
-            const matches = modelCandidates.filter(
+            const matches = selectionCandidates.filter(
               (s) =>
                 s.model.id.toLowerCase().includes(lowerSpec) ||
                 (s.model.name &&
@@ -585,7 +583,7 @@ export function registerSubagentModule(
               resolvedThinking = matched.thinkingLevel as
                 ThinkingLevel | undefined;
             } else {
-              const availableNames = modelCandidates
+              const availableNames = selectionCandidates
                 .map((s) => `${s.model.provider}/${s.model.id}`)
                 .join(", ");
               throw new Error(
@@ -601,16 +599,16 @@ export function registerSubagentModule(
           }
         }
         if (!modelSpec && existing && scopeRestricted) {
-          if (!scopedList.length)
+          if (!scopedModels.length)
             throw new Error(
               "No models in the live session scope are currently available; adjust /scoped-models or provider authentication",
             );
-          const savedInScope = scopedList.find(
+          const savedInScope = scopedModels.find(
             (entry) =>
               `${entry.model.provider}/${entry.model.id}` === opts.savedModel,
           );
           if (!savedInScope) {
-            const parentInScope = scopedList.find(
+            const parentInScope = scopedModels.find(
               (entry) =>
                 entry.model.provider === ctx.model?.provider &&
                 entry.model.id === ctx.model?.id,
@@ -623,7 +621,7 @@ export function registerSubagentModule(
               resolvedModel = ctx.model;
               resolvedThinking = ctx.thinkingLevel as ThinkingLevel | undefined;
             } else {
-              const fallback = scopedList[0];
+              const fallback = scopedModels[0];
               resolvedModel = fallback.model;
               resolvedThinking = fallback.thinkingLevel as
                 ThinkingLevel | undefined;
@@ -662,7 +660,7 @@ export function registerSubagentModule(
         const requestedThinking = opts.thinking ?? resolvedThinking;
         const scopedEntry =
           !resolvedModel && !existing
-            ? scopedList?.find(
+            ? scopedModels?.find(
                 (s) =>
                   s.model.id === ctx.model?.id &&
                   s.model.provider === ctx.model?.provider,
@@ -670,7 +668,7 @@ export function registerSubagentModule(
             : undefined;
         const savedEntry =
           existing && !resolvedModel && opts.savedModel
-            ? modelCandidates.find(
+            ? selectionCandidates.find(
                 (entry) =>
                   `${entry.model.provider}/${entry.model.id}` ===
                   opts.savedModel,
@@ -1020,6 +1018,7 @@ export function registerSubagentModule(
           .join("\n");
         return {
           session,
+          model: initializedModel,
           modelFallbackMessage: modelFallbackMessage || undefined,
           toolInheritanceWarning,
           actualTools,
@@ -1316,6 +1315,7 @@ export function registerSubagentModule(
       }
 
       let session: Awaited<ReturnType<typeof createAgentSession>>["session"];
+      let childModel: Awaited<ReturnType<typeof setupChildSession>>["model"];
       let modelFallbackMessage: string | undefined;
       let toolInheritanceWarning: string | undefined;
       let sessionFile: string;
@@ -1410,6 +1410,7 @@ export function registerSubagentModule(
         if (!prepared)
           throw new Error("Child session setup returned no session");
         session = prepared.session;
+        childModel = prepared.model;
         modelFallbackMessage = prepared.modelFallbackMessage;
         toolInheritanceWarning = prepared.toolInheritanceWarning;
         actualTools = prepared.actualTools;
@@ -1421,11 +1422,6 @@ export function registerSubagentModule(
             removeLock();
           }
         };
-        if (!session.model) {
-          await disposeChild();
-          removeFreshSessionFile();
-          throw new Error("Subagent session did not initialize a model");
-        }
         try {
           if (!existing) {
             sessionManager.appendCustomEntry("pi-subagents", {
@@ -1454,8 +1450,7 @@ export function registerSubagentModule(
         throw setupError;
       }
 
-      const pid = manager.getNextPid();
-      manager.nextVirtualPid = pid + 1;
+      const pid = manager.nextVirtualPid++;
       const completionId = randomUUID();
       let timedOut = false;
       let cancelled = false;
@@ -1478,7 +1473,7 @@ export function registerSubagentModule(
         description?.trim() ||
           (prompt.length > 30 ? `${prompt.slice(0, 30)}...` : prompt),
       );
-      const displayModel = `${session.model.provider}/${session.model.id}`;
+      const displayModel = `${childModel.provider}/${childModel.id}`;
       const fallback = [
         modelFallbackMessage ? `\nModel fallback: ${modelFallbackMessage}` : "",
         toolInheritanceWarning

@@ -37,7 +37,7 @@
 - Query the live, available session model scope with paginated `action:models`; do not cache unsaved scope edits.
 - Resume atomically on a current scoped fallback and persist effective model/thinking changes.
 - Use compact model-visible JSON, context-scaled output caps (max 16 KB per child / 32 KB per batch, 400 lines), and human-only display details.
-- Default completions to automatic parent continuation, batch explicitly background results by origin within the byte budget, cap retained logs at 10 MB, and deduplicate delivery.
+- Default completions to automatic parent continuation, batch explicitly background results by origin within the byte budget, cap retained logs at 100 MB, and deduplicate delivery.
 - Bound fork context by complete message/tool groups within a 64 KB aggregate budget and preserve the newest assistant reply.
 - Sync parent runtime credentials and availability on resumes, and avoid requeueing completions the session already persisted.
 - Remove repeated scoped-model injection and shorten persistent tool guidance.
