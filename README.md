@@ -13,7 +13,7 @@ When working on complex projects, you often need to run independent tasks in par
 - Have two agents explore competing implementations of the same feature simultaneously.
 - Split a large refactor across independent modules without merge conflicts.
 
-`pi-subagents` gives the LLM two focused tools: `subagent` for delegation and `subagent_models` for deliberate model selection.
+`pi-subagents` gives the LLM one focused tool: `subagent` for delegation. Valid model IDs are injected into the session prompt each turn, so no separate discovery tool is needed.
 
 ## How it works
 
@@ -45,11 +45,7 @@ The child investigates using `read`, `bash`, `grep`, etc., and returns its findi
 
 ### 2. Choosing a Model
 
-Children inherit the parent’s current model by default. For specialized work, query the live Pi model list first, then pass an exact model ID:
-
-```text
-subagent_models({})
-```
+Children inherit the parent’s current model by default. Each turn, the extension injects the current model and the session's available/scoped model IDs into the prompt, so pass an exact ID directly:
 
 ```text
 subagent({
@@ -58,7 +54,7 @@ subagent({
 })
 ```
 
-Use `subagent_models` when reasoning ability, context size, cost, or input modality materially affects the task. Do not choose a model just because it appears first in the list.
+Pass a different model only when reasoning ability, context size, cost, or input modality materially affects the task; invalid or out-of-scope IDs are rejected with the available names in the error.
 
 ### 3. Parallel Coding with Git Worktrees (`worktree: true`)
 
@@ -102,14 +98,14 @@ The child runs while you keep working. When it finishes, its result is delivered
 | Parameter    | Type      | Default    | Description                                                                                                                    |
 | :----------- | :-------- | :--------- | :----------------------------------------------------------------------------------------------------------------------------- |
 | `prompt`     | `string`  | _required_ | Self-contained task instructions with context, file paths, and completion criteria.                                            |
-| `model`      | `string`  | _unset_    | Exact model ID from `subagent_models`; omit to inherit the current model.                                                      |
+| `model`      | `string`  | _unset_    | Exact available provider/model ID; omit to inherit the current model.                                                          |
 | `worktree`   | `boolean` | `false`    | Run in an isolated Git worktree; required for concurrent file writes. Omit for read-only tasks.                                |
 | `background` | `boolean` | `false`    | Run asynchronously in the background without blocking the current turn.                                                        |
 | `sessionId`  | `string`  | _unset_    | Continue an existing session from an earlier result: resumes it when finished, or steers it with `prompt` while still running. |
 | `stop`       | `boolean` | `false`    | With `sessionId`: interrupt that session. Reports terminal state instead of erroring if it already finished.                   |
 | `peek`       | `boolean` | `false`    | With `sessionId`: return its state, current activity, and last output without disturbing it.                                   |
 
-`subagent_models` accepts an optional `offset` for pagination and returns live Pi model capabilities.
+Model IDs listed in the prompt hint refresh every turn, so `/scoped-models` changes and provider availability are always current.
 
 ---
 

@@ -471,33 +471,6 @@ export function getSubagentModelCandidates(
   return candidates;
 }
 
-export function describeSubagentModel(
-  candidate: SubagentModelCandidate,
-  current?: Model<any>,
-) {
-  const { model } = candidate;
-  return {
-    model: modelKey(model),
-    ...(current && modelKey(model) === modelKey(current)
-      ? { current: true }
-      : {}),
-    ...(model.reasoning ? { reasoning: true } : {}),
-    ...(candidate.thinkingLevel
-      ? { configuredThinking: candidate.thinkingLevel }
-      : {}),
-    ...(model.cost
-      ? {
-          costPerMillionTokens: {
-            input: model.cost.input,
-            output: model.cost.output,
-            cacheRead: model.cost.cacheRead,
-            cacheWrite: model.cost.cacheWrite,
-          },
-        }
-      : {}),
-  };
-}
-
 export function isPathInside(root: string, target: string) {
   let realRoot: string;
   let realTarget: string;

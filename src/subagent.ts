@@ -45,7 +45,6 @@ import {
 } from "./types.js";
 import {
   acquireSessionLock,
-  describeSubagentModel,
   extractTextContent,
   getScopedModels,
   getSubagentModelCandidates,
@@ -263,86 +262,33 @@ export function registerSubagentModule(
     return cards.join("\n\n");
   }
 
-  async function listLiveSubagentModels(ctx: ExtensionContext, offset = 0) {
+  // Live model hint for the parent prompt. pi's system prompt carries no
+  // model info, so a fresh session cannot discover valid IDs on its own.
+  // One line per turn; ctx getters are live, so /scoped-models changes and
+  // model switches are reflected without any listing tool.
+  pi.on("before_agent_start", async (event, ctx) => {
     const parentRuntime = (ctx.modelRegistry as any)?.runtime as
       ModelRuntime | undefined;
     if (parentRuntime) await refreshRuntime(parentRuntime);
-    return listSubagentModels(ctx, offset);
-  }
-
-  function listSubagentModels(ctx: ExtensionContext, offset = 0) {
-    const candidates = getSubagentModelCandidates(ctx);
-    const page = candidates.slice(offset, offset + MAX_LIST_ITEMS);
-    const models = page.map((candidate) =>
-      describeSubagentModel(candidate, ctx.model),
+    const current = ctx.model
+      ? `${ctx.model.provider}/${ctx.model.id}`
+      : undefined;
+    if (!current) return;
+    const names = getSubagentModelCandidates(ctx).map(
+      (entry) => `${entry.model.provider}/${entry.model.id}`,
     );
-    const nextOffset =
-      offset + models.length < candidates.length
-        ? offset + models.length
-        : undefined;
-    const unrestricted = getScopedModels(ctx).length === 0;
-    const display = `${unrestricted ? "Available subagent models" : "Scoped subagent models"}:\n${models
-      .map(
-        (entry) =>
-          `- ${entry.model}${entry.current ? " (current)" : ""}${entry.reasoning ? " [reasoning]" : ""}`,
-      )
-      .join("\n")}`;
-    return {
-      content: [
-        {
-          type: "text" as const,
-          text: JSON.stringify({
-            v: 1,
-            type: "subagent",
-            action: "models",
-            scope: unrestricted ? "unrestricted" : "restricted",
-            current: ctx.model
-              ? `${ctx.model.provider}/${ctx.model.id}`
-              : undefined,
-            models,
-            ...(nextOffset !== undefined ? { nextOffset } : {}),
-            total: candidates.length,
-          }),
-        },
-      ],
-      details: {
-        models,
-        unrestricted,
-        nextOffset,
-        total: candidates.length,
-        displayText: display,
-      },
-    };
-  }
-
-  pi.registerTool({
-    name: "subagent_models",
-    label: "Subagent Models",
-    description: "live models for subagent selection.",
-    promptSnippet: "live models for subagent selection.",
-    parameters: Type.Object({
-      offset: Type.Optional(
-        Type.Integer({
-          minimum: 0,
-          description: "Offset from previous nextOffset",
-        }),
-      ),
-    }),
-    async execute(_id, args: { offset?: number }, _signal, _up, ctx) {
-      // Match the legacy action:"models" path so both entry points report
-      // the same live availability.
-      return listLiveSubagentModels(ctx, Math.max(0, args.offset ?? 0));
-    },
-    renderCall(_args, theme) {
-      return new Text(
-        theme.fg("toolTitle", theme.bold("Subagent models")),
-        0,
-        0,
-      );
-    },
-    renderResult(result, options, theme) {
-      return renderToolResult(result, options, theme, 12);
-    },
+    // fine <8 names fit one prompt line; errors carry full lists beyond this
+    const listed = names.slice(0, 8);
+    const nameList =
+      listed.join(", ") +
+      (names.length > listed.length
+        ? `, +${names.length - listed.length} more`
+        : "");
+    const guidance =
+      getScopedModels(ctx).length > 0
+        ? ` Scoped models: ${nameList} — pass one of these or omit to inherit.`
+        : ` Available: ${nameList}. Omit model to inherit; pass an exact ID only when capability or cost matters.`;
+    event.systemPrompt += `\n\n[pi-subagents] Subagent models: current = ${current}.${guidance}`;
   });
 
   const subagentCommand = {
@@ -415,7 +361,6 @@ export function registerSubagentModule(
     promptGuidelines: [
       "delegate: keep simple work in parent; batch independent work in parallel in one turn.",
       "isolate: the child sees only your prompt — write a self-contained brief with paths, constraints, and done-criteria checkable by evidence; state the target behavior rather than prohibitions; omit model to inherit parent.",
-      "select: reach subagent_models only when reasoning/context/cost matters.",
       "dispatch: worktree:true for concurrent writes; background:true returns immediately and delivers its result as a new message that restarts your turn — end your turn after dispatching instead of holding it open.",
       "continue: pass sessionId from any subagent result with a follow-up prompt; it resumes a finished session or steers a running one.",
       "control: sessionId + stop:true interrupts the child; sessionId + peek:true reports progress and last output cheaply.",
@@ -438,7 +383,8 @@ export function registerSubagentModule(
         ),
         model: Type.Optional(
           Type.String({
-            description: "Exact provider/model ID from subagent_models",
+            description:
+              "Exact provider/model ID available to this session; omit to inherit the current model",
           }),
         ),
         worktree: Type.Optional(
@@ -482,7 +428,6 @@ export function registerSubagentModule(
         sessionId,
         message,
         completion,
-        modelOffset = 0,
         model,
         thinking,
         tools,
@@ -794,8 +739,8 @@ export function registerSubagentModule(
                   : "");
               throw new Error(
                 scopeRestricted
-                  ? `Model '${modelSpec}' is outside the live session scope. Query subagent_models and retry. Scope: ${availableNames}`
-                  : `Model '${modelSpec}' is unavailable. Query subagent_models or omit model to inherit the parent`,
+                  ? `Model '${modelSpec}' is outside the live session scope. Scoped models: ${availableNames}`
+                  : `Model '${modelSpec}' is unavailable. Omit model to inherit the parent, or use an available ID: ${availableNames}`,
               );
             }
           } else {
@@ -1239,9 +1184,6 @@ export function registerSubagentModule(
         };
       };
 
-      if (action === "models") {
-        return listLiveSubagentModels(ctx, Math.max(0, modelOffset));
-      }
       if (action === "status") {
         const active = new Map(
           Array.from(manager.jobs.values()).map((job) => [job.sessionId, job]),

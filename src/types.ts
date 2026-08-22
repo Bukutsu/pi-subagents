@@ -26,13 +26,12 @@ export type TerminalState =
   "finished" | "failed" | "stopped" | "timed-out" | "interrupted";
 
 export interface SubagentToolArgs {
-  action?: "spawn" | "status" | "stop" | "steer" | "models";
+  action?: "spawn" | "status" | "stop" | "steer";
   prompt?: string;
   description?: string;
   sessionId?: string;
   message?: string;
   completion?: "queue" | "continue";
-  modelOffset?: number;
   model?: string;
   thinking?: string;
   tools?: string;

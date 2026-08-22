@@ -14,11 +14,13 @@ import { validateToolArguments } from "@earendil-works/pi-ai";
 function setup() {
   const tools: any[] = [];
   const commands: any[] = [];
+  const handlers: Record<string, any> = {};
   const pi: any = {
     registerTool: (tool: any) => tools.push(tool),
     registerCommand: (name: string, command: any) =>
       commands.push({ name, command }),
     registerMessageRenderer() {},
+    on: (event: string, handler: any) => (handlers[event] = handler),
     getActiveTools: () => ["read", "bash", "subagent"],
   };
   const manager: any = {
@@ -37,7 +39,7 @@ function setup() {
     currentRecord: () => undefined,
   };
   registerSubagentModule(pi, manager);
-  return { tools, commands, manager };
+  return { tools, commands, manager, handlers };
 }
 
 test("skips child resource-loader initialization", () => {
@@ -69,8 +71,6 @@ test("registers the subagent tool and slash command", async () => {
     "stop",
     "peek",
   ]);
-  const modelTool = tools.find((tool) => tool.name === "subagent_models");
-  assert.ok(modelTool);
 
   const ctx: any = {
     cwd: process.cwd(),
@@ -96,8 +96,10 @@ test("registers the subagent tool and slash command", async () => {
   assert.equal(status.details.displayText, "No matching subagent sessions.");
 });
 
-test("lists the current model before scoped alternatives", async () => {
-  const { tools } = setup();
+test("model hint lists current first, scoped alternatives live", async () => {
+  const { handlers } = setup();
+  const onBeforeAgentStart = handlers["before_agent_start"];
+  assert.ok(onBeforeAgentStart);
   const current = {
     provider: "provider",
     id: "current",
@@ -118,77 +120,63 @@ test("lists the current model before scoped alternatives", async () => {
     input: ["text"],
     cost: { input: 0.1, output: 0.2, cacheRead: 0, cacheWrite: 0 },
   };
-  const modelTool = tools.find((tool) => tool.name === "subagent_models");
+  // Live getters mirror pi's ExtensionContext: values resolved at call time.
+  let scopedModels: Array<{ model: { provider: string; id: string } }> = [];
   const ctx: any = {
-    model: current,
-    scopedModels: [{ model: alternative }],
+    get model() {
+      return current;
+    },
+    get scopedModels() {
+      return scopedModels;
+    },
     modelRegistry: {
       getAvailable: () => [current, alternative],
     },
   };
+  const event: any = { systemPrompt: "base" };
 
-  const result = await modelTool.execute(
-    "models-current-first",
-    {},
-    undefined,
-    undefined,
-    ctx,
+  await onBeforeAgentStart(event, ctx);
+  assert.match(
+    event.systemPrompt,
+    /Subagent models: current = provider\/current/,
   );
-  const parsed = JSON.parse(result.content[0].text);
-  assert.equal(parsed.models[0].model, "provider/current");
-  assert.equal(parsed.models[0].current, true);
-  assert.equal(parsed.models[1].model, "provider/alternative");
+  assert.doesNotMatch(event.systemPrompt, /Scoped models:/);
+
+  // /scoped-models changes mid session; the next turn must reflect it.
+  // The current model stays listed first even when out of scope (spawn
+  // resolution keeps it selectable so omit == passing its ID).
+  scopedModels = [{ model: alternative }];
+  const secondEvent: any = { systemPrompt: "base" };
+  await onBeforeAgentStart(secondEvent, ctx);
+  assert.match(
+    secondEvent.systemPrompt,
+    /Scoped models: provider\/current, provider\/alternative/,
+  );
 });
 
-test("queries the live session model scope", async () => {
+test('legacy action:"models" is gone; status still works', async () => {
   const { tools } = setup();
   const subagent = tools.find((tool) => tool.name === "subagent");
-  const scopedModels: Array<{
-    model: { provider: string; id: string };
-    thinkingLevel?: string;
-  }> = [
-    {
-      model: { provider: "provider", id: "one" },
-      thinkingLevel: "high",
-    },
-  ];
   const ctx: any = {
     cwd: process.cwd(),
-    scopedModels,
-    modelRegistry: {
-      getAvailable: () => scopedModels.map((entry) => entry.model),
-    },
+    scopedModels: [],
+    modelRegistry: { getAvailable: () => [] },
     sessionManager: {
-      getLeafId: () => "leaf-1",
-      getBranch: () => [{ id: "leaf-1" }],
+      getSessionId: () => "smoke-session",
+      getSessionFile: () => undefined,
     },
   };
+  ctx.sessionManager.getLeafId = () => "leaf-1";
+  ctx.sessionManager.getBranch = () => [{ id: "leaf-1" }];
 
-  const first = await subagent.execute(
-    "models-1",
-    { action: "models" },
-    undefined,
-    undefined,
-    ctx,
-  );
-  assert.equal(
-    JSON.parse(first.content[0].text).models[0].model,
-    "provider/one",
-  );
-
-  scopedModels.splice(0, 1, {
-    model: { provider: "provider", id: "two" },
-  });
-  const second = await subagent.execute(
-    "models-2",
-    { action: "models" },
-    undefined,
-    undefined,
-    ctx,
-  );
-  assert.equal(
-    JSON.parse(second.content[0].text).models[0].model,
-    "provider/two",
+  await assert.rejects(() =>
+    subagent.execute(
+      "models-gone",
+      { action: "models" },
+      undefined,
+      undefined,
+      ctx,
+    ),
   );
 });
 
@@ -499,9 +487,7 @@ test("validates subagent parameters", async () => {
   );
 });
 
-test("supports extension models in models action and model resolution", async () => {
-  const { tools } = setup();
-  const subagent = tools.find((tool) => tool.name === "subagent");
+test("hint lists extension-registered models", async () => {
   const extensionModels = [
     {
       provider: "antigravity",
@@ -518,6 +504,7 @@ test("supports extension models in models action and model resolution", async ()
   };
   const ctx: any = {
     cwd: process.cwd(),
+    model: extensionModels[0],
     scopedModels: [],
     modelRegistry: {
       runtime: mockRuntime,
@@ -535,17 +522,13 @@ test("supports extension models in models action and model resolution", async ()
     },
   };
 
-  const modelsResult = await subagent.execute(
-    "models-ext",
-    { action: "models" },
-    undefined,
-    undefined,
-    ctx,
-  );
-  const parsed = JSON.parse(modelsResult.content[0].text);
-  assert.equal(parsed.total, 2);
-  assert.equal(parsed.models[0].model, "antigravity/gemini-3.7-flash");
-  assert.equal(parsed.models[1].model, "flm/gemma3:1b");
+  const { handlers } = setup();
+  const onBeforeAgentStart = handlers["before_agent_start"];
+  assert.ok(onBeforeAgentStart);
+  const event: any = { systemPrompt: "base" };
+  await onBeforeAgentStart(event, ctx);
+  assert.match(event.systemPrompt, /antigravity\/gemini-3\.7-flash/);
+  assert.match(event.systemPrompt, /flm\/gemma3:1b/);
 });
 
 test("refreshes model runtime snapshot after binding extensions", async () => {
@@ -585,16 +568,11 @@ test("refreshes model runtime snapshot after binding extensions", async () => {
     },
   };
 
-  const { tools } = setup();
-  const subagent = tools.find((tool) => tool.name === "subagent");
-  assert.ok(subagent);
-  await subagent.execute(
-    "models-refresh",
-    { action: "models" },
-    undefined,
-    undefined,
-    ctx,
-  );
+  const { handlers } = setup();
+  const onBeforeAgentStart = handlers["before_agent_start"];
+  assert.ok(onBeforeAgentStart);
+  const event: any = { systemPrompt: "base" };
+  await onBeforeAgentStart(event, ctx);
   assert.equal(refreshCalled, true);
 });
 

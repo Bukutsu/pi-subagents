@@ -856,7 +856,9 @@ export class SubagentManager {
         try {
           const record = this.currentRecord(job);
           const elapsed = Math.round((Date.now() - job.startedAt) / 1000);
-          const cost = record.usage.cost ? ` · $${record.usage.cost.toFixed(4)}` : "";
+          const cost = record.usage.cost
+            ? ` · $${record.usage.cost.toFixed(4)}`
+            : "";
           description = sanitizeTerminalOutput(
             `${record.model}${record.thinking ? `:${record.thinking}` : ""} · ${elapsed}s · ${record.turns} turn${record.turns === 1 ? "" : "s"} · ${record.toolCount} tool${record.toolCount === 1 ? "" : "s"}${cost}${job.activity ? ` · ${sanitizeTerminalOutput(job.activity)}` : ""}`,
           );
@@ -865,7 +867,11 @@ export class SubagentManager {
         }
         const icon = job.stopping ? "◐" : "●";
         const label = job.command.replace(/^Subagent: /, "");
-        return { value: String(job.pid), label: `${icon} ${label}`, description };
+        return {
+          value: String(job.pid),
+          label: `${icon} ${label}`,
+          description,
+        };
       });
 
     const choice = await ctx.ui.custom<string | null>(
@@ -874,14 +880,21 @@ export class SubagentManager {
         container.addChild(new DynamicBorder((s) => theme.fg("accent", s)));
         container.addChild(
           new Text(
-            theme.fg("accent", theme.bold(`Subagents (${this.jobs.size} running)`)),
+            theme.fg(
+              "accent",
+              theme.bold(`Subagents (${this.jobs.size} running)`),
+            ),
             1,
             0,
           ),
         );
         const items: SelectItem[] = [
           ...jobItems(),
-          { value: "all", label: "Stop all", description: "Cancel every running subagent" },
+          {
+            value: "all",
+            label: "Stop all",
+            description: "Cancel every running subagent",
+          },
         ];
         const selectList = new SelectList(items, Math.min(items.length, 10), {
           selectedPrefix: (t) => theme.fg("accent", t),

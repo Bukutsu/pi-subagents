@@ -2,7 +2,9 @@
 
 ## Unreleased
 
-+- Refresh stale model-facing strings: recovery and model-error messages now reference the current `subagent` / `subagent_models` call shapes, worktree completions carry the merge handoff, and the `control:` guideline no longer narrows stop to runaway children.
++- Replace the `subagent_models` tool with a live one-line model hint injected into the system prompt each turn (`before_agent_start`): current model plus capped available/scoped IDs, always reflecting mid-session `/scoped-models` changes. The `subagent` tool's `model` param stays; validation errors now list available names directly.
+
+- Refresh stale model-facing strings: recovery and model-error messages now reference the current `subagent` call shapes, worktree completions carry the merge handoff, and the `control:` guideline no longer narrows stop to runaway children.
 
 - Distill `writing-for-agents` into the `isolate` dispatch guideline: the child sees only your prompt, so briefs carry paths, constraints, and evidence-checkable done-criteria, phrased positively.
 - State the background wake contract at every dispatch site (`background` param, tool guidelines, spawn result, README): results arrive as a new message that restarts an idle turn, so agents end their turn instead of holding it open with sleep loops.
