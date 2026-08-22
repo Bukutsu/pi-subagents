@@ -291,6 +291,43 @@ test("passes triggerTurn: false when delivering follow-up queue completions duri
   });
 });
 
+test("idle queue completions honor triggerTurn to wake the parent", () => {
+  const calls: Array<{ message: unknown; options: unknown }> = [];
+  const manager = new SubagentManager({
+    sendMessage: (message: unknown, options: unknown) =>
+      calls.push({ message, options }),
+  } as any);
+  const ctx: any = {
+    isIdle: () => true,
+    sessionManager: {
+      getLeafId: () => "leaf-1",
+      getBranch: () => [{ id: "leaf-1" }],
+    },
+  };
+
+  (manager as any).sendCompletionMessage(
+    "queued result",
+    "queue",
+    "leaf-1",
+    true,
+    ctx,
+  );
+  assert.equal(calls.length, 1);
+  assert.deepEqual(calls[0].options, { triggerTurn: true });
+
+  // Manual stops pass triggerTurn:false and stay silent.
+  calls.length = 0;
+  (manager as any).sendCompletionMessage(
+    "stopped result",
+    "queue",
+    "leaf-1",
+    false,
+    ctx,
+  );
+  assert.equal(calls.length, 1);
+  assert.deepEqual(calls[0].options, { triggerTurn: false });
+});
+
 test("killJob is idempotent for a known pid that is already stopping", () => {
   const manager = new SubagentManager({} as any);
   const controller = new AbortController();

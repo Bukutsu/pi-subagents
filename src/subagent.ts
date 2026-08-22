@@ -1,7 +1,10 @@
 import { randomUUID } from "node:crypto";
 import {
+  closeSync,
   existsSync,
+  openSync,
   readFileSync,
+  readSync,
   realpathSync,
   rmSync,
   statSync,
@@ -168,6 +171,60 @@ export function registerSubagentModule(
     };
   }
 
+  // Peek support: cheap tail read of the child's session file, scanning
+  // backwards for the most recent assistant text. Tolerates partial lines
+  // at the window start and missing/unreadable files.
+  const PEEK_TAIL_BYTES = 64 * 1024;
+  const PEEK_OUTPUT_CHARS = 600;
+  function readLastAssistantText(
+    sessionFile: string,
+    maxChars: number,
+  ): string | undefined {
+    try {
+      const stat = statSync(sessionFile);
+      if (!stat.isFile()) return undefined;
+      const start = Math.max(0, stat.size - PEEK_TAIL_BYTES);
+      const length = stat.size - start;
+      const buffer = Buffer.alloc(length);
+      const handle = openSync(sessionFile, "r");
+      try {
+        readSync(handle, buffer, 0, length, start);
+      } finally {
+        closeSync(handle);
+      }
+      const lines = buffer.toString("utf8").split("\n");
+      for (let i = lines.length - 1; i >= 0; i--) {
+        const line = lines[i]!.trim();
+        if (!line) continue;
+        let entry: {
+          type?: string;
+          message?: { role?: string; content?: Array<unknown> };
+        };
+        try {
+          entry = JSON.parse(line);
+        } catch {
+          continue; // partial first line of the tail window
+        }
+        if (entry?.type !== "message" || entry.message?.role !== "assistant")
+          continue;
+        const text = (entry.message.content ?? [])
+          .map((part) =>
+            part && typeof part === "object" && "text" in part
+              ? (part as { text?: unknown }).text
+              : undefined,
+          )
+          .filter((text): text is string => typeof text === "string")
+          .join("\n")
+          .trim();
+        if (!text) continue;
+        return text.length > maxChars ? `…${text.slice(-maxChars)}` : text;
+      }
+      return undefined;
+    } catch {
+      return undefined;
+    }
+  }
+
   function formatSubagentStatusTable(
     sessions: Array<ReturnType<typeof statusDetails>>,
   ) {
@@ -288,9 +345,9 @@ export function registerSubagentModule(
     },
   });
 
-  pi.registerCommand("subagent", {
+  const subagentCommand = {
     description: "List and manage background subagents",
-    getArgumentCompletions: (prefix) => {
+    getArgumentCompletions: (prefix: string) => {
       const items = [
         {
           value: "kill all",
@@ -305,7 +362,7 @@ export function registerSubagentModule(
       ].filter((item) => item.value.startsWith(prefix));
       return items.length ? items : null;
     },
-    handler: async (args, ctx) => {
+    handler: async (args: string | undefined, ctx: ExtensionContext) => {
       manager.currentCtx = ctx;
       const trimmed = args?.trim() ?? "";
       if (/^kill\s+all$/i.test(trimmed)) {
@@ -329,31 +386,39 @@ export function registerSubagentModule(
         return;
       }
       if (trimmed.startsWith("kill")) {
-        ctx.ui.notify("Usage: /subagent kill <pid>", "error");
+        ctx.ui.notify("Usage: /subagents kill <pid>", "error");
         return;
       }
       if (trimmed) {
         ctx.ui.notify(
-          `Unknown /subagent command: ${sanitizeTerminalOutput(trimmed)}`,
+          `Unknown /subagents argument: ${sanitizeTerminalOutput(trimmed)}`,
           "error",
         );
         return;
       }
       if (ctx.hasUI) await manager.manageJobs(ctx);
     },
+  };
+  pi.registerCommand("subagents", subagentCommand);
+  // Backward-compatible alias for the pre-rename command name.
+  pi.registerCommand("subagent", {
+    ...subagentCommand,
+    description: "Alias of /subagents",
   });
 
   pi.registerTool({
     name: "subagent",
     label: "Subagent",
     description:
-      "delegate — child session for independent work. Inherits parent model/tools/cwd.",
+      "delegate — child session for independent work. Inherits parent model/tools/cwd. Pass sessionId from a prior result to continue that session: it resumes when finished, or steers while still running. sessionId also accepts stop:true to interrupt it or peek:true to check on it.",
     promptSnippet: "delegate to child session.",
     promptGuidelines: [
       "delegate: keep simple work in parent; batch independent work in parallel in one turn.",
       "isolate: include paths, constraints, and done-criteria; omit model to inherit parent.",
       "select: reach subagent_models only when reasoning/context/cost matters.",
-      "dispatch: worktree:true for concurrent writes; background:true to return immediately.",
+      "dispatch: worktree:true for concurrent writes; background:true returns immediately and delivers its result as a new message that restarts your turn — end your turn after dispatching instead of holding it open.",
+      "continue: pass sessionId from any subagent result with a follow-up prompt; it resumes a finished session or steers a running one.",
+      "control: sessionId + stop:true interrupts a runaway child; sessionId + peek:true reports progress and last output cheaply.",
     ],
     executionMode: "parallel" as const,
     prepareArguments(args: unknown) {
@@ -368,9 +433,9 @@ export function registerSubagentModule(
     },
     parameters: Type.Object(
       {
-        prompt: Type.String({
-          description: "Task for child session",
-        }),
+        prompt: Type.Optional(
+          Type.String({ description: "Task for child session" }),
+        ),
         model: Type.Optional(
           Type.String({
             description: "Exact provider/model ID from subagent_models",
@@ -383,7 +448,25 @@ export function registerSubagentModule(
         ),
         background: Type.Optional(
           Type.Boolean({
-            description: "Return immediately",
+            description:
+              "Return immediately; the finished result arrives later as a new message that starts a turn",
+          }),
+        ),
+        sessionId: Type.Optional(
+          Type.String({
+            description:
+              "Existing subagent session from an earlier result. Still running: delivers prompt as guidance. Otherwise: resumes it with prompt.",
+          }),
+        ),
+        stop: Type.Optional(
+          Type.Boolean({
+            description: "Interrupt the targeted session. Requires sessionId.",
+          }),
+        ),
+        peek: Type.Optional(
+          Type.Boolean({
+            description:
+              "Return the targeted session's state, current activity, and last output without disturbing it. Requires sessionId.",
           }),
         ),
       },
@@ -407,7 +490,9 @@ export function registerSubagentModule(
         worktree = false,
         background = false,
         context = "project",
-        timeoutSec = 600,
+        timeoutSec = 1800,
+        stop = false,
+        peek = false,
       } = args;
       manager.currentCtx = ctx;
       const originLeafId = ctx.sessionManager.getLeafId();
@@ -471,6 +556,111 @@ export function registerSubagentModule(
       const matching = requestedId
         ? findActiveSubagent(requestedId)
         : undefined;
+
+      // ── Interactive verbs on an existing session: interrupt or glance ──
+      if ((stop || peek) && !requestedId)
+        throw new Error(
+          `sessionId is required to ${stop ? "stop" : "peek at"} a subagent`,
+        );
+      if (stop && requestedId) {
+        if (matching) {
+          manager.killJob(matching.pid);
+          manager.syncStatus(ctx);
+          return {
+            content: [
+              {
+                type: "text" as const,
+                text: JSON.stringify({
+                  v: 1,
+                  type: "subagent",
+                  action: "stop",
+                  sessionId: matching.sessionId,
+                  state: "stopping",
+                }),
+              },
+            ],
+            details: {
+              sessionId: matching.sessionId,
+              state: "stopping",
+              displayText: `Stopping subagent ${matching.sessionId}`,
+            },
+          };
+        }
+        const record = findDurableRecord(requestedId);
+        if (!record)
+          throw new Error(
+            `Subagent session not found in ${SUBAGENT_INDEX}: ${requestedId}`,
+          );
+        // Already terminal: report instead of erroring so the caller does
+        // not burn a retry on a no-op.
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: JSON.stringify({
+                v: 1,
+                type: "subagent",
+                action: "stop",
+                sessionId: record.sessionId,
+                state: record.state,
+                note: "not running",
+              }),
+            },
+          ],
+          details: {
+            sessionId: record.sessionId,
+            state: record.state,
+            displayText: `Subagent ${record.sessionId} is not running (${record.state})`,
+          },
+        };
+      }
+      if (peek && requestedId) {
+        const record = matching?.record ?? findDurableRecord(requestedId);
+        if (!matching && !record)
+          throw new Error(
+            `Subagent session not found in ${SUBAGENT_INDEX}: ${requestedId}`,
+          );
+        const state = matching
+          ? matching.stopping
+            ? "stopping"
+            : "running"
+          : record!.state;
+        const output = record
+          ? readLastAssistantText(record.sessionFile, PEEK_OUTPUT_CHARS)
+          : undefined;
+        const payload: Record<string, unknown> = {
+          v: 1,
+          type: "subagent",
+          action: "peek",
+          sessionId: record?.sessionId ?? requestedId,
+          state,
+          ...(record?.model ? { model: record.model } : {}),
+          ...(matching?.activity ? { activity: matching.activity } : {}),
+          ...(record?.turns !== undefined ? { turns: record.turns } : {}),
+          ...(matching
+            ? {
+                elapsedSec: Math.round(
+                  (Date.now() - matching.startedAt) / 1000,
+                ),
+              }
+            : {}),
+          ...(record?.durationSec ? { durationSec: record.durationSec } : {}),
+          ...(output ? { output } : {}),
+        };
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: JSON.stringify(payload),
+            },
+          ],
+          details: {
+            sessionId: record?.sessionId ?? requestedId,
+            state,
+            displayText: `Peeked at subagent ${record?.sessionId ?? requestedId}: ${state}${matching?.activity ? ` (${matching.activity})` : ""}`,
+          },
+        };
+      }
 
       // ── setupChildSession: child-session setup for spawn ──
       // Model resolution, tool allowlist, session creation, and extension
@@ -1113,6 +1303,20 @@ export function registerSubagentModule(
           ],
           details: { sessions, displayText: text },
         };
+      }
+      // Native contract: subagent(sessionId, prompt) without an explicit
+      // action targets an existing session — steer it while it streams,
+      // otherwise fall through and resume it in the spawn path below.
+      const explicitAction = Boolean((args as Record<string, unknown>)?.action);
+      if (
+        !explicitAction &&
+        requestedId &&
+        prompt?.trim() &&
+        matching?.session?.isStreaming &&
+        matching.session.steer
+      ) {
+        action = "steer";
+        message = prompt;
       }
       if (action === "stop") {
         if (!matching)
@@ -1910,7 +2114,13 @@ export function registerSubagentModule(
       }
 
       const location = branch ? `\nBranch: ${branch}` : "";
-      const displayText = `${existing ? "Continued" : "Created"} subagent "${label}" [${displayModel}:${session.thinkingLevel}] • Session: ${session.sessionId}.${location}${fallback}`;
+      // State the wake contract at dispatch time: models hold their turn
+      // open with sleep loops when they believe ending the turn loses the
+      // result. Delivery restarts an idle parent automatically.
+      const backgroundNote = background
+        ? " Runs in background; the result arrives as a new message that starts a turn. End your turn once independent work is done."
+        : "";
+      const displayText = `${existing ? "Continued" : "Created"} subagent "${label}" [${displayModel}:${session.thinkingLevel}] • Session: ${session.sessionId}.${location}${fallback}${backgroundNote}`;
       return {
         content: [
           {

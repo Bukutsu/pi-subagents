@@ -41,6 +41,8 @@ export interface SubagentToolArgs {
   background?: boolean;
   context?: "project" | "fork";
   timeoutSec?: number;
+  stop?: boolean;
+  peek?: boolean;
 }
 
 export interface SubagentRecord {

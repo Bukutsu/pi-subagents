@@ -1,11 +1,15 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
 import extension from "../index.js";
 import {
   registerSubagentModule,
   resolveCompletion,
   shouldForwardApiKey,
 } from "../src/subagent.js";
+import { validateToolArguments } from "@earendil-works/pi-ai";
 
 function setup() {
   const tools: any[] = [];
@@ -54,12 +58,16 @@ test("registers the subagent tool and slash command", async () => {
   const { tools, commands } = setup();
   const subagent = tools.find((tool) => tool.name === "subagent");
   assert.ok(subagent);
+  assert.ok(commands.some((command) => command.name === "subagents"));
   assert.ok(commands.some((command) => command.name === "subagent"));
   assert.deepEqual(Object.keys(subagent.parameters.properties), [
     "prompt",
     "model",
     "worktree",
     "background",
+    "sessionId",
+    "stop",
+    "peek",
   ]);
   const modelTool = tools.find((tool) => tool.name === "subagent_models");
   assert.ok(modelTool);
@@ -223,6 +231,204 @@ test("steer preserves completion mode when omitted", async () => {
     ctx,
   );
   assert.equal(job.completion, "continue");
+});
+
+test("bare sessionId plus prompt steers a still-running session", async () => {
+  const { tools, manager } = setup();
+  const subagent = tools.find((tool) => tool.name === "subagent");
+  const steered: string[] = [];
+  const session = {
+    isStreaming: true,
+    steer: async (text: string) => {
+      steered.push(text);
+    },
+  };
+  manager.jobs.set(
+    1,
+    { pid: 1, sessionId: "session-live", session, completion: "continue" } as any,
+  );
+  const ctx: any = {
+    cwd: process.cwd(),
+    scopedModels: [],
+    modelRegistry: { getAvailable: () => [] },
+    sessionManager: {
+      getLeafId: () => "leaf-1",
+      getBranch: () => [{ id: "leaf-1" }],
+    },
+  };
+
+  const result = await subagent.execute(
+    "native-steer",
+    { sessionId: "session-live", prompt: "wrap it up" },
+    undefined,
+    undefined,
+    ctx,
+  );
+  const payload = JSON.parse(result.content[0].text);
+  assert.equal(payload.action, "steer");
+  assert.equal(payload.queued, true);
+  assert.deepEqual(steered, ["wrap it up"]);
+});
+
+test("bare sessionId plus prompt on an unknown id falls through to resume", async () => {
+  const { tools } = setup();
+  const subagent = tools.find((tool) => tool.name === "subagent");
+  const ctx: any = {
+    cwd: process.cwd(),
+    scopedModels: [],
+    modelRegistry: { getAvailable: () => [] },
+    sessionManager: {
+      getLeafId: () => "leaf-1",
+      getBranch: () => [{ id: "leaf-1" }],
+    },
+  };
+
+  // No active job and no durable record: must take the resume path (which
+  // reports the missing durable record), not the steer or fresh-spawn path.
+  await assert.rejects(
+    () =>
+      subagent.execute(
+        "native-resume",
+        { sessionId: "session-gone", prompt: "continue please" },
+        undefined,
+        undefined,
+        ctx,
+      ),
+    /Subagent session not found/,
+  );
+});
+
+test("stop and peek require sessionId", async () => {
+  const { tools } = setup();
+  const subagent = tools.find((tool) => tool.name === "subagent");
+
+  // Prompt-less control calls must pass schema validation.
+  const validated = validateToolArguments(subagent, {
+    type: "toolCall",
+    id: "t1",
+    name: "subagent",
+    arguments: { peek: true, sessionId: "session-x" },
+  });
+  assert.deepEqual(validated, { peek: true, sessionId: "session-x" });
+
+  const ctx: any = {
+    cwd: process.cwd(),
+    scopedModels: [],
+    modelRegistry: { getAvailable: () => [] },
+    sessionManager: {
+      getLeafId: () => "leaf-1",
+      getBranch: () => [{ id: "leaf-1" }],
+    },
+  };
+
+  await assert.rejects(
+    () => subagent.execute("s1", { stop: true }, undefined, undefined, ctx),
+    /sessionId is required to stop/,
+  );
+  await assert.rejects(
+    () => subagent.execute("p1", { peek: true }, undefined, undefined, ctx),
+    /sessionId is required to peek/,
+  );
+});
+
+test("stop interrupts a running session", async () => {
+  const { tools, manager } = setup();
+  const subagent = tools.find((tool) => tool.name === "subagent");
+  const killed: number[] = [];
+  manager.killJob = (pid: number) => {
+    killed.push(pid);
+    return true;
+  };
+  manager.jobs.set(7, { pid: 7, sessionId: "session-stop" });
+  const ctx: any = {
+    cwd: process.cwd(),
+    scopedModels: [],
+    modelRegistry: { getAvailable: () => [] },
+    sessionManager: {
+      getLeafId: () => "leaf-1",
+      getBranch: () => [{ id: "leaf-1" }],
+    },
+  };
+
+  const result = await subagent.execute(
+    "stop-run",
+    { sessionId: "session-stop", stop: true },
+    undefined,
+    undefined,
+    ctx,
+  );
+  const payload = JSON.parse(result.content[0].text);
+  assert.equal(payload.action, "stop");
+  assert.equal(payload.state, "stopping");
+  assert.deepEqual(killed, [7]);
+});
+
+test("peek reports live state and last assistant output", async () => {
+  const { tools, manager } = setup();
+  const subagent = tools.find((tool) => tool.name === "subagent");
+  const dir = mkdtempSync(join(tmpdir(), "pi-subagent-peek-"));
+  const sessionFile = join(dir, "child.jsonl");
+  writeFileSync(
+    sessionFile,
+    [
+      JSON.stringify({
+        type: "message",
+        message: { role: "user", content: [{ type: "text", text: "hi" }] },
+      }),
+      JSON.stringify({
+        type: "message",
+        message: {
+          role: "assistant",
+          content: [
+            { type: "thinking", thinking: "hmm" },
+            { type: "text", text: "PEEK-MARKER done" },
+          ],
+        },
+      }),
+    ].join("\n"),
+  );
+  manager.jobs.set(9, {
+    pid: 9,
+    sessionId: "session-peek",
+    startedAt: Date.now() - 5_000,
+    activity: "tool: bash",
+    stopping: false,
+    record: {
+      sessionId: "session-peek",
+      sessionFile,
+      model: "provider/one",
+      turns: 3,
+    },
+  });
+  const ctx: any = {
+    cwd: process.cwd(),
+    scopedModels: [],
+    modelRegistry: { getAvailable: () => [] },
+    sessionManager: {
+      getLeafId: () => "leaf-1",
+      getBranch: () => [{ id: "leaf-1" }],
+    },
+  };
+
+  try {
+    const result = await subagent.execute(
+      "peek-run",
+      { sessionId: "session-peek", peek: true },
+      undefined,
+      undefined,
+      ctx,
+    );
+    const payload = JSON.parse(result.content[0].text);
+    assert.equal(payload.action, "peek");
+    assert.equal(payload.state, "running");
+    assert.equal(payload.activity, "tool: bash");
+    assert.equal(payload.model, "provider/one");
+    assert.equal(payload.turns, 3);
+    assert.match(payload.output, /PEEK-MARKER done/);
+    assert.ok(!payload.output.includes("hmm"), "thinking must be excluded");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 test("validates subagent parameters", async () => {

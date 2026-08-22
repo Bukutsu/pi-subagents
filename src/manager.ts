@@ -2,9 +2,12 @@ import type {
   ExtensionAPI,
   ExtensionContext,
 } from "@earendil-works/pi-coding-agent";
-import { truncateTail } from "@earendil-works/pi-coding-agent";
+import { DynamicBorder, truncateTail } from "@earendil-works/pi-coding-agent";
 import {
   Box,
+  Container,
+  type SelectItem,
+  SelectList,
   Text,
   visibleWidth,
   truncateToWidth,
@@ -244,7 +247,7 @@ export class SubagentManager {
       return (_event: unknown, ctx: ExtensionContext) => {
         if (this.activeCount() > 0) {
           ctx.ui.notify(
-            `Cannot ${action} while ${this.activeCount()} subagent${this.activeCount() === 1 ? "" : "s"} running. Stop them with /subagent first.`,
+            `Cannot ${action} while ${this.activeCount()} subagent${this.activeCount() === 1 ? "" : "s"} running. Stop them with /subagents first.`,
             "error",
           );
           return { cancel: true };
@@ -300,7 +303,7 @@ export class SubagentManager {
           const action =
             event.reason === "reload" ? "Reload" : "Session replacement";
           ctx.ui.notify(
-            `${action} is waiting for ${this.activeCount()} running subagent${this.activeCount() === 1 ? "" : "s"}. Stop them with /subagent or wait for them to finish.`,
+            `${action} is waiting for ${this.activeCount()} running subagent${this.activeCount() === 1 ? "" : "s"}. Stop them with /subagents or wait for them to finish.`,
             "info",
           );
           // Setups have no run-phase deadline; cancel them so a hung setup
@@ -474,7 +477,15 @@ export class SubagentManager {
               }
 
               const bottom = bColor("╰" + "─".repeat(innerWidth) + "╯");
-              return [top, ...jobLines, bottom].map((line) =>
+              const hintContent = ` ${theme.fg("dim", "↳ /subagents to manage")}`;
+              const hintFill = " ".repeat(
+                Math.max(0, innerWidth - visibleWidth(hintContent)),
+              );
+              const hint =
+                bColor("│") +
+                truncateToWidth(hintContent + hintFill, innerWidth) +
+                bColor("│");
+              return [top, ...jobLines, hint, bottom].map((line) =>
                 truncateToWidth(line, width),
               );
             },
@@ -523,7 +534,9 @@ export class SubagentManager {
     const options =
       completion === "queue"
         ? idle
-          ? { triggerTurn: false as const }
+          ? // Parent is idle: honor triggerTurn so finished background work
+            // starts a turn instead of piling up until the next user prompt.
+            { triggerTurn }
           : { deliverAs: "followUp" as const, triggerTurn: false as const }
         : { deliverAs: "steer" as const, triggerTurn };
     this.pi.sendMessage(
@@ -836,28 +849,79 @@ export class SubagentManager {
   public async manageJobs(ctx: ExtensionContext) {
     if (this.jobs.size === 0)
       return ctx.ui.notify("No subagents running", "info");
-    const choice = await ctx.ui.select("Select subagent to stop:", [
-      "Cancel",
-      "Stop all",
-      ...Array.from(
-        this.jobs.values(),
-        (job) =>
-          `[${job.pid}] ${job.command} [session: ${job.sessionId.slice(0, 8)}] (${Math.round((Date.now() - job.startedAt) / 1000)}s)`,
-      ),
-    ]);
-    if (choice === "Stop all") {
+
+    const jobItems = (): SelectItem[] =>
+      Array.from(this.jobs.values(), (job) => {
+        let description: string;
+        try {
+          const record = this.currentRecord(job);
+          const elapsed = Math.round((Date.now() - job.startedAt) / 1000);
+          const cost = record.usage.cost ? ` · $${record.usage.cost.toFixed(4)}` : "";
+          description = sanitizeTerminalOutput(
+            `${record.model}${record.thinking ? `:${record.thinking}` : ""} · ${elapsed}s · ${record.turns} turn${record.turns === 1 ? "" : "s"} · ${record.toolCount} tool${record.toolCount === 1 ? "" : "s"}${cost}${job.activity ? ` · ${sanitizeTerminalOutput(job.activity)}` : ""}`,
+          );
+        } catch {
+          description = sanitizeTerminalOutput(job.record.model);
+        }
+        const icon = job.stopping ? "◐" : "●";
+        const label = job.command.replace(/^Subagent: /, "");
+        return { value: String(job.pid), label: `${icon} ${label}`, description };
+      });
+
+    const choice = await ctx.ui.custom<string | null>(
+      (tui, theme, _keybindings, done) => {
+        const container = new Container();
+        container.addChild(new DynamicBorder((s) => theme.fg("accent", s)));
+        container.addChild(
+          new Text(
+            theme.fg("accent", theme.bold(`Subagents (${this.jobs.size} running)`)),
+            1,
+            0,
+          ),
+        );
+        const items: SelectItem[] = [
+          ...jobItems(),
+          { value: "all", label: "Stop all", description: "Cancel every running subagent" },
+        ];
+        const selectList = new SelectList(items, Math.min(items.length, 10), {
+          selectedPrefix: (t) => theme.fg("accent", t),
+          selectedText: (t) => theme.fg("accent", t),
+          description: (t) => theme.fg("muted", t),
+          scrollInfo: (t) => theme.fg("dim", t),
+          noMatch: (t) => theme.fg("warning", t),
+        });
+        selectList.onSelect = (item) => done(item.value);
+        selectList.onCancel = () => done(null);
+        container.addChild(selectList);
+        container.addChild(
+          new Text(theme.fg("dim", "enter stop · esc cancel"), 1, 0),
+        );
+        container.addChild(new DynamicBorder((s) => theme.fg("accent", s)));
+
+        return {
+          render: (w: number) => container.render(w),
+          invalidate: () => container.invalidate(),
+          handleInput: (data: string) => {
+            selectList.handleInput(data);
+            tui.requestRender();
+          },
+        };
+      },
+    );
+
+    if (choice === null) return;
+    if (choice === "all") {
       const stopped = this.killAllJobs();
       ctx.ui.notify(
         `Stopped ${stopped} subagent${stopped === 1 ? "" : "s"}`,
         "info",
       );
-      this.syncStatus(ctx);
-      return;
+    } else {
+      const pid = Number(choice);
+      if (Number.isInteger(pid) && this.killJob(pid)) {
+        ctx.ui.notify(`Stopped subagent ${pid}`, "info");
+      }
     }
-    const pid = Number(choice?.match(/\[(-?\d+)\]/)?.[1]);
-    if (choice !== "Cancel" && Number.isInteger(pid) && this.killJob(pid)) {
-      ctx.ui.notify(`Stopped subagent ${pid}`, "info");
-      this.syncStatus(ctx);
-    }
+    this.syncStatus(ctx);
   }
 }

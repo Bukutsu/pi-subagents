@@ -2,6 +2,10 @@
 
 ## Unreleased
 
++- State the background wake contract at every dispatch site (`background` param, tool guidelines, spawn result, README): results arrive as a new message that restarts an idle turn, so agents end their turn instead of holding it open with sleep loops.
+- Rename the management command to `/subagents` (`/subagent` remains as an alias) and point the status widget at it.
+- Rebuild the `/subagents` dialog on pi's native `SelectList`: each job shows state, model, elapsed time, turns, tools, cost, and live activity.
+
 - Remove the active-subagent cap; any number of children may run concurrently, with per-child and batched result byte caps keeping context growth bounded.
 - Flush queued completions when the parent settles and coalesce model-runtime refreshes.
 - Remove the unbounded legacy `context:fork` spawn path; use the default project context instead.

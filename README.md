@@ -21,7 +21,7 @@ When working on complex projects, you often need to run independent tasks in par
 2. **In-process & fast**: No Docker containers or background daemons. Children run as lightweight Pi agent sessions inside the same process.
 3. **Synchronous by default**: Subagents block and return their (capped) result directly in the tool response. Dispatch as many children in parallel as you need; per-child and batched result caps keep parent context growth predictable.
 4. **Bounded results**: Output budgets scale with the model's context window (up to 16 KB per child and 32 KB per batched delivery) to keep parent context growth predictable.
-5. **Session replacement is coordinated**: `/reload`, `/new`, `/resume`, and tree navigation are blocked while subagents are running; `/reload` waits up to 10s for them to finish. Stop them with `/subagent kill all` when replacement must happen immediately.
+5. **Session replacement is coordinated**: `/reload`, `/new`, `/resume`, and tree navigation are blocked while subagents are running; `/reload` waits up to 10s for them to finish. Stop them with `/subagents kill all` when replacement must happen immediately.
 
 ## Install
 
@@ -93,18 +93,21 @@ If you want the subagent to run in the background without blocking the current t
 }
 ```
 
-The result is queued silently until your next prompt turn.
+The child runs while you keep working. When it finishes, its result is delivered to this conversation as a new message that starts a turn automatically — so end your turn after dispatching and let the delivery wake you. Holding the turn open with `sleep` or polling is never needed.
 
 ---
 
 ## Tool Reference
 
-| Parameter    | Type      | Default    | Description                                                                                     |
-| :----------- | :-------- | :--------- | :---------------------------------------------------------------------------------------------- |
-| `prompt`     | `string`  | _required_ | Self-contained task instructions with context, file paths, and completion criteria.             |
-| `model`      | `string`  | _unset_    | Exact model ID from `subagent_models`; omit to inherit the current model.                       |
-| `worktree`   | `boolean` | `false`    | Run in an isolated Git worktree; required for concurrent file writes. Omit for read-only tasks. |
-| `background` | `boolean` | `false`    | Run asynchronously in the background without blocking the current turn.                         |
+| Parameter    | Type      | Default    | Description                                                                                                                    |
+| :----------- | :-------- | :--------- | :----------------------------------------------------------------------------------------------------------------------------- |
+| `prompt`     | `string`  | _required_ | Self-contained task instructions with context, file paths, and completion criteria.                                            |
+| `model`      | `string`  | _unset_    | Exact model ID from `subagent_models`; omit to inherit the current model.                                                      |
+| `worktree`   | `boolean` | `false`    | Run in an isolated Git worktree; required for concurrent file writes. Omit for read-only tasks.                                |
+| `background` | `boolean` | `false`    | Run asynchronously in the background without blocking the current turn.                                                        |
+| `sessionId`  | `string`  | _unset_    | Continue an existing session from an earlier result: resumes it when finished, or steers it with `prompt` while still running. |
+| `stop`       | `boolean` | `false`    | With `sessionId`: interrupt that session. Reports terminal state instead of erroring if it already finished.                   |
+| `peek`       | `boolean` | `false`    | With `sessionId`: return its state, current activity, and last output without disturbing it.                                   |
 
 `subagent_models` accepts an optional `offset` for pagination and returns live Pi model capabilities.
 
@@ -114,9 +117,10 @@ The result is queued silently until your next prompt turn.
 
 Manage running subagents directly from Pi:
 
-- `/subagent` — Open the interactive TUI management dialog to view active jobs and resource usage.
-- `/subagent kill <pid>` — Stop a specific running subagent.
-- `/subagent kill all` — Cancel all running subagents and clean up resources immediately.
+- `/subagents` — Open the interactive TUI management dialog to view active jobs (model, elapsed time, activity, cost) and stop them. The status widget above the editor links to it.
+- `/subagent` — Alias of `/subagents`.
+- `/subagents kill <pid>` — Stop a specific running subagent.
+- `/subagents kill all` — Cancel all running subagents and clean up resources immediately.
 
 ---
 
