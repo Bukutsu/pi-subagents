@@ -414,7 +414,7 @@ export function registerSubagentModule(
     promptSnippet: "delegate to child session.",
     promptGuidelines: [
       "delegate: keep simple work in parent; batch independent work in parallel in one turn.",
-      "isolate: include paths, constraints, and done-criteria; omit model to inherit parent.",
+      "isolate: the child sees only your prompt — write a self-contained brief with paths, constraints, and done-criteria checkable by evidence; state the target behavior rather than prohibitions; omit model to inherit parent.",
       "select: reach subagent_models only when reasoning/context/cost matters.",
       "dispatch: worktree:true for concurrent writes; background:true returns immediately and delivers its result as a new message that restarts your turn — end your turn after dispatching instead of holding it open.",
       "continue: pass sessionId from any subagent result with a follow-up prompt; it resumes a finished session or steers a running one.",
