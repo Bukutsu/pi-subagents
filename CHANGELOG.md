@@ -2,6 +2,8 @@
 
 ## Unreleased
 
++- Refresh stale model-facing strings: recovery and model-error messages now reference the current `subagent` / `subagent_models` call shapes, worktree completions carry the merge handoff, and the `control:` guideline no longer narrows stop to runaway children.
+
 - Distill `writing-for-agents` into the `isolate` dispatch guideline: the child sees only your prompt, so briefs carry paths, constraints, and evidence-checkable done-criteria, phrased positively.
 - State the background wake contract at every dispatch site (`background` param, tool guidelines, spawn result, README): results arrive as a new message that restarts an idle turn, so agents end their turn instead of holding it open with sleep loops.
 - Rename the management command to `/subagents` (`/subagent` remains as an alias) and point the status widget at it.

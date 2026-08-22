@@ -318,8 +318,8 @@ export function registerSubagentModule(
   pi.registerTool({
     name: "subagent_models",
     label: "Subagent Models",
-    description: "list — live models for subagent selection.",
-    promptSnippet: "list models for subagent selection.",
+    description: "live models for subagent selection.",
+    promptSnippet: "live models for subagent selection.",
     parameters: Type.Object({
       offset: Type.Optional(
         Type.Integer({
@@ -418,7 +418,7 @@ export function registerSubagentModule(
       "select: reach subagent_models only when reasoning/context/cost matters.",
       "dispatch: worktree:true for concurrent writes; background:true returns immediately and delivers its result as a new message that restarts your turn — end your turn after dispatching instead of holding it open.",
       "continue: pass sessionId from any subagent result with a follow-up prompt; it resumes a finished session or steers a running one.",
-      "control: sessionId + stop:true interrupts a runaway child; sessionId + peek:true reports progress and last output cheaply.",
+      "control: sessionId + stop:true interrupts the child; sessionId + peek:true reports progress and last output cheaply.",
     ],
     executionMode: "parallel" as const,
     prepareArguments(args: unknown) {
@@ -794,8 +794,8 @@ export function registerSubagentModule(
                   : "");
               throw new Error(
                 scopeRestricted
-                  ? `Model '${modelSpec}' is outside the live session scope. Query subagent action:models and retry. Scope: ${availableNames}`
-                  : `Model '${modelSpec}' is unavailable. Query subagent action:models or omit model to inherit the parent`,
+                  ? `Model '${modelSpec}' is outside the live session scope. Query subagent_models and retry. Scope: ${availableNames}`
+                  : `Model '${modelSpec}' is unavailable. Query subagent_models or omit model to inherit the parent`,
               );
             }
           } else {
@@ -1385,7 +1385,7 @@ export function registerSubagentModule(
           },
         };
       }
-      if (!prompt?.trim()) throw new Error("prompt is required for spawn");
+      if (!prompt?.trim()) throw new Error("prompt is required");
       // Normal delegation wakes the parent when the child finishes. The
       // explicit background escape hatch keeps the result queued silently.
       completion = resolveCompletion(completion, background);
@@ -1977,11 +1977,14 @@ export function registerSubagentModule(
           const completedRecord = job.record!;
           const usage = completedRecord.usage;
           const costText = usage.cost ? `, $${usage.cost.toFixed(4)}` : "";
-          const badge = `\n\n— Subagent ${state} (${completedRecord.durationSec ?? 0}s, ${completedRecord.turns} turn${completedRecord.turns === 1 ? "" : "s"}, ${completedRecord.toolCount} tool${completedRecord.toolCount === 1 ? "" : "s"}${costText}) • Session: ${session.sessionId}`;
+          const branchText = completedRecord.branch
+            ? ` • Branch: ${completedRecord.branch} — inspect with git diff HEAD..${completedRecord.branch}, then git merge --no-ff ${completedRecord.branch} and delete the branch`
+            : "";
+          const badge = `\n\n— Subagent ${state} (${completedRecord.durationSec ?? 0}s, ${completedRecord.turns} turn${completedRecord.turns === 1 ? "" : "s"}, ${completedRecord.toolCount} tool${completedRecord.toolCount === 1 ? "" : "s"}${costText}) • Session: ${session.sessionId}${branchText}`;
           const recovery =
             state === "finished"
               ? ""
-              : `\n\nSession ${session.sessionId} is saved and can be resumed with subagent spawn(sessionId: "${session.sessionId}", prompt: "...").`;
+              : `\n\nSession ${session.sessionId} is saved; resume it with subagent({ sessionId: "${session.sessionId}", prompt: "..." }).`;
           const heading = timedOut
             ? "Background subagent timed out"
             : stopped

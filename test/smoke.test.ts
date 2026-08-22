@@ -243,10 +243,12 @@ test("bare sessionId plus prompt steers a still-running session", async () => {
       steered.push(text);
     },
   };
-  manager.jobs.set(
-    1,
-    { pid: 1, sessionId: "session-live", session, completion: "continue" } as any,
-  );
+  manager.jobs.set(1, {
+    pid: 1,
+    sessionId: "session-live",
+    session,
+    completion: "continue",
+  } as any);
   const ctx: any = {
     cwd: process.cwd(),
     scopedModels: [],
@@ -457,7 +459,7 @@ test("validates subagent parameters", async () => {
         undefined,
         ctx,
       ),
-    /prompt is required for spawn/,
+    /prompt is required/,
   );
 
   await assert.rejects(
